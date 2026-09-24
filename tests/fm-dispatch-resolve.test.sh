@@ -318,6 +318,22 @@ TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" 'candidate: gemini:gemini-3.8-flash-high  provider=google  scope=all_models  remaining=72%  spendPriority=0.3  runway=through_reset  -> eligible' "Gemini resolves through its explicit provider"
 assert_contains "$out" "  profile: --harness 'gemini' --model 'gemini-3.8-flash-high'" "Gemini is a typed verified dispatch harness"
 
+# A gateway profile (Claude Code through the local CLIProxyAPI on another
+# vendor's model) is ranked by the provider it declares: the fixture's codex
+# row (31%, -0.1649) rather than claude's (79%, -0.4627), and the clear
+# profile line carries --gateway so fm-spawn launches it through the proxy.
+cat > "$RULES" <<'JSON'
+{"rules":[{"when":"Work that should run on the proxied OpenAI model.","use":{"harness":"claude","model":"gpt-6-sol","effort":"high","provider":"codex","gateway":"cliproxy"}}],"default":{"harness":"claude","model":"opus"}}
+JSON
+cat > "$RESPONSE" <<'JSON'
+{"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"rule_1","confidence":0.9,"probabilities":{"rule_1":0.95,"default":0.05}}},"usage":{"input_tokens":812,"output_tokens":60}}
+JSON
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "a gateway profile resolves"
+assert_contains "$out" 'candidate: claude:gpt-6-sol  gateway=cliproxy  provider=codex  scope=all_models  remaining=31%  spendPriority=-0.1649  runway=projected_exhaustion  -> eligible' "a gateway candidate is ranked by its declared provider, never as claude"
+assert_contains "$out" "  profile: --harness 'claude' --model 'gpt-6-sol' --effort 'high' --gateway 'cliproxy'" "the clear profile line carries the gateway flag"
+
 cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
 cat > "$RESPONSE" <<'JSON'
 {"model":"jev-1.13.0","answers":{"rule":{"type":"choice","choice":"default","confidence":0.9,"probabilities":{"rule_1":0.02,"rule_2":0.02,"rule_3":0.02,"default":0.94}}},"usage":{"input_tokens":812,"output_tokens":60}}
@@ -328,7 +344,7 @@ assert_contains "$out" '  status: clear' "the documented example passes opted-in
 assert_contains "$out" 'candidate: pi:anthropic/claude-sonnet-5  provider=claude' "the documented Pi default uses its declared Claude provider"
 assert_not_contains "$err" 'malformed rules file' "the documented example reaches resolution"
 cp "$BASE_RULES" "$RULES"
-pass "no-rule fallback, Agy, Gemini, and documented configurations resolve"
+pass "no-rule fallback, Agy, Gemini, a gateway profile, and documented configurations resolve"
 
 # --- ambiguous: fixed confidence floor -----------------------------------------
 reset_log
@@ -880,6 +896,9 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":" claude"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":"claude\n"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":{"harness":"codex","floor":{"scope":"all_models","min_percent":20,"provider":"claude"}}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","model":"gpt-6-sol","gateway":"cliproxy"}}]}|each use profile gateway must be cliproxy on a claude profile whose model does not start with claude and whose provider names the proxied vendor, never claude' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","model":"claude-sonnet-5","provider":"codex","gateway":"cliproxy"}}]}|each use profile gateway must be cliproxy on a claude profile whose model does not start with claude and whose provider names the proxied vendor, never claude' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"codex","model":"gpt-6-sol","provider":"codex","gateway":"cliproxy"}}|each default profile gateway must be cliproxy on a claude profile whose model does not start with claude and whose provider names the proxied vendor, never claude' \
   '{"rules":[{"when":"x","use":[{"harness":"codex","model":"gpt-5.5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]}]}|each rule use must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":[{"harness":"claude","model":"opus"},{"harness":"claude","model":"opus"}]}|default must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \

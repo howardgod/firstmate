@@ -824,6 +824,112 @@ test_explicit_model_wins_over_the_recorded_one() {
   pass "fm-control relaunch: explicit model and effort win over the recorded ones"
 }
 
+# A recorded Claude gateway (gateway=cliproxy, bin/fm-claude-gateway-lib.sh)
+# follows a same-harness relaunch; an explicit --gateway none or a harness
+# switch drops it; a kept gateway that conflicts with the replacement profile
+# refuses before the agent stops. The shared settings file lives under the
+# launching user's HOME, which run_control and run_spawn pin to the case's
+# throwaway user-home.
+add_gateway_settings() {  # <case-dir>
+  mkdir -p "$1/user-home/.claude"
+  printf '%s\n' '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8317"},"apiKeyHelper":"cat ~/.claude/cliproxy-api-key"}' \
+    > "$1/user-home/.claude/cliproxy-settings.json"
+}
+
+add_gateway_ship_task() {  # <case-dir> <id>
+  add_ship_task "$1" "$2" claude
+  sed 's/^model=default$/model=gpt-6-sol/; s/^effort=default$/effort=high/' \
+    "$1/home/state/$2.meta" > "$1/home/state/$2.meta.tmp"
+  printf 'gateway=cliproxy\n' >> "$1/home/state/$2.meta.tmp"
+  mv "$1/home/state/$2.meta.tmp" "$1/home/state/$2.meta"
+  add_gateway_settings "$1"
+}
+
+test_same_harness_relaunch_keeps_the_gateway() {
+  local dir out rc
+  dir=$(new_case keepgateway rl40)
+  add_gateway_ship_task "$dir" rl40
+  out=$(run_control "$dir" rl40 relaunch --note "same proxy"); rc=$?
+  expect_code 0 "$rc" "a same-harness gateway relaunch should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl40 gateway)" = cliproxy ] || fail "the gateway should carry across a same-harness relaunch"
+  [ "$(meta_field "$dir" rl40 model)" = gpt-6-sol ] || fail "the model should carry across a same-harness relaunch"
+  assert_grep "ANTHROPIC_DEFAULT_HAIKU_MODEL='gpt-6-sol'" "$dir/fake/literal" "the replacement launch should map the model roles onto the proxied model"
+  assert_grep "cliproxy-api-key" "$dir/fake/literal" "the replacement launch should carry the merged proxy settings"
+  pass "fm-control relaunch: a same-harness relaunch keeps the recorded Claude gateway"
+}
+
+test_gateway_none_drops_the_recorded_gateway() {
+  local dir out rc
+  dir=$(new_case dropgateway rl41)
+  add_gateway_ship_task "$dir" rl41
+  out=$(run_control "$dir" rl41 relaunch --gateway none --model sonnet --note "back to the subscription"); rc=$?
+  expect_code 0 "$rc" "--gateway none with an Anthropic model should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl41 gateway)" ] || fail "--gateway none must drop the recorded gateway"
+  [ "$(meta_field "$dir" rl41 model)" = sonnet ] || fail "the explicit model should be recorded"
+  assert_no_grep "ANTHROPIC_DEFAULT_HAIKU_MODEL" "$dir/fake/literal" "a dropped gateway must map no model role"
+  assert_grep "-u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY" "$dir/fake/literal" "the subscription launch still sheds the supervisor endpoint credentials"
+  pass "fm-control relaunch: --gateway none returns the task to the subscription"
+}
+
+test_harness_switch_drops_the_gateway() {
+  local dir out rc
+  dir=$(new_case switchgateway rl42)
+  add_gateway_ship_task "$dir" rl42
+  printf 'codex' > "$dir/fake/becomes"
+  out=$(run_control "$dir" rl42 relaunch --harness codex --note "switching runtime"); rc=$?
+  expect_code 0 "$rc" "a harness switch off a gateway task should succeed"$'\n'"$out"
+  [ "$(meta_field "$dir" rl42 harness)" = codex ] || fail "the record should follow the switch"
+  [ -z "$(meta_field "$dir" rl42 gateway)" ] || fail "a harness switch must not carry the Claude gateway"
+  pass "fm-control relaunch: a harness switch drops the Claude gateway with the other profile axes"
+}
+
+test_kept_gateway_refuses_an_anthropic_model_before_stop() {
+  local dir out rc
+  dir=$(new_case gatewayclaude rl43)
+  add_gateway_ship_task "$dir" rl43
+  out=$(run_control "$dir" rl43 relaunch --model claude-sonnet-5 --note "wrong turn"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a kept gateway with an Anthropic model must refuse"$'\n'"$out"
+  assert_contains "$out" "never go through CLIProxyAPI" "the refusal should say why"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the running agent must not be stopped by a refused relaunch"
+  [ ! -e "$dir/home/state/rl43.control-relaunch" ] || fail "a refusal before the checkpoint must leave no journal"
+  [ "$(meta_field "$dir" rl43 gateway)" = cliproxy ] || fail "the record must be untouched"
+  [ "$(meta_field "$dir" rl43 model)" = gpt-6-sol ] || fail "the recorded model must be untouched"
+  pass "fm-control relaunch: a kept gateway refuses an Anthropic model before anything stops"
+}
+
+test_gateway_relaunch_refuses_a_missing_settings_file_before_stop() {
+  local dir out rc
+  dir=$(new_case gatewayfile rl44)
+  add_gateway_ship_task "$dir" rl44
+  rm -f "$dir/user-home/.claude/cliproxy-settings.json"
+  out=$(run_control "$dir" rl44 relaunch --note "settings gone"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a gateway relaunch without the settings file must refuse"$'\n'"$out"
+  assert_contains "$out" "it is missing" "the refusal should name the missing file"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the running agent must not be stopped by a refused relaunch"
+  [ ! -e "$dir/home/state/rl44.control-relaunch" ] || fail "a refusal before the checkpoint must leave no journal"
+  pass "fm-control relaunch: a gateway relaunch refuses a missing proxy settings file before anything stops"
+}
+
+test_spawn_relaunch_preserves_the_recorded_gateway() {
+  local dir out rc
+  dir=$(new_case spawngateway rl45)
+  add_gateway_ship_task "$dir" rl45
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl45 --relaunch); rc=$?
+  [ "$rc" -ne 0 ] || fail "a direct relaunch that keeps the gateway but names no model must refuse"$'\n'"$out"
+  assert_contains "$out" "needs an explicit non-Anthropic --model" "the refusal should ask for the model"
+  [ "$(meta_field "$dir" rl45 gateway)" = cliproxy ] || fail "a refused direct relaunch must leave the record untouched"
+  out=$(run_spawn "$dir" rl45 --relaunch --model gpt-6-sol); rc=$?
+  expect_code 0 "$rc" "a direct relaunch naming the model should keep the gateway"$'\n'"$out"
+  [ "$(meta_field "$dir" rl45 gateway)" = cliproxy ] || fail "fm-spawn --relaunch must preserve the recorded gateway"
+  assert_contains "$out" "gateway=cliproxy" "the launch should report the preserved gateway"
+  printf 'zsh' > "$dir/fake/command"
+  out=$(run_spawn "$dir" rl45 --relaunch --model sonnet --gateway none); rc=$?
+  expect_code 0 "$rc" "a direct relaunch with --gateway none should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl45 gateway)" ] || fail "--gateway none must drop the recorded gateway on a direct relaunch"
+  pass "fm-spawn --relaunch: the recorded gateway is preserved unless --gateway names a new value"
+}
+
 test_relaunch_onto_an_unverified_harness_is_refused() {
   local dir out rc
   dir=$(new_case badharness rl8)
@@ -2351,6 +2457,12 @@ test_native_ultra_relaunch_preserves_profile_and_rejects_before_stop
 test_signed_out_worker_account_pin_refuses_before_stop
 test_worker_account_pin_follows_the_relaunch
 test_explicit_model_wins_over_the_recorded_one
+test_same_harness_relaunch_keeps_the_gateway
+test_gateway_none_drops_the_recorded_gateway
+test_harness_switch_drops_the_gateway
+test_kept_gateway_refuses_an_anthropic_model_before_stop
+test_gateway_relaunch_refuses_a_missing_settings_file_before_stop
+test_spawn_relaunch_preserves_the_recorded_gateway
 test_relaunch_onto_an_unverified_harness_is_refused
 test_prior_harness_turnend_registry_entry_is_cleared
 test_wiring_removal_failure_refuses_before_replacement_arm

@@ -1207,6 +1207,15 @@ crew_dispatch_validate() {
       else "default profile model and effort must be non-empty strings when present"
       end
     elif $typed and has("default") and malformed_profile_floors([profiles(.default)[]?]) then "default profile floor needs scope and min_percent 0..100"
+    # A gateway profile is Claude Code launched through the local CLIProxyAPI
+    # on a model from another vendor (bin/fm-claude-gateway-lib.sh owns the
+    # launch refusals); the field is validated whether or not typed resolution
+    # is active, because quota routing reads its provider on every intake.
+    elif ([configured_profiles[] | select(has("gateway") and .gateway != "cliproxy")] | length) > 0 then
+      "unknown gateway: " + ([configured_profiles[] | select(has("gateway") and .gateway != "cliproxy") | .gateway | tostring] | unique | join(", "))
+    elif any(configured_profiles[]; has("gateway") and .harness != "claude") then "gateway cliproxy applies only to harness claude"
+    elif any(configured_profiles[]; has("gateway") and (((.model | type) != "string") or ((.model | tostring) | startswith("claude")))) then "gateway cliproxy profile needs a model that does not start with claude: Anthropic models never go through the proxy"
+    elif any(configured_profiles[]; has("gateway") and ((provider_id(.provider) | not) or .provider == "claude")) then "gateway cliproxy profile needs a provider naming the proxied vendor, never claude"
     else
       (configured_profiles
         | map(.harness)
@@ -1230,7 +1239,8 @@ crew_dispatch_validate() {
       + (if ($p.model? != null) then "/" + ($p.model | tostring)
          elif ($p.effort? != null) then "/default"
          else "" end)
-      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end);
+      + (if ($p.effort? != null) then "/" + ($p.effort | tostring) else "" end)
+      + (if ($p.gateway? != null) then " via " + ($p.gateway | tostring) else "" end);
     def profile_set($value; $selector):
       if ($value | type) == "array" then
         (($selector // "quota-balanced") + "[" + ([$value[] | profile(.)] | join(", ")) + "]")
