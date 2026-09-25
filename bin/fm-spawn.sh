@@ -94,9 +94,10 @@
 #   operator contract. Every refusal lands before any endpoint, worktree, or
 #   record exists. A gateway launch records gateway=cliproxy in the task record
 #   and on the spawned line; every other record omits the line. Every claude
-#   launch, gateway or not, sheds the supervisor's ANTHROPIC_BASE_URL,
-#   ANTHROPIC_AUTH_TOKEN, and ANTHROPIC_API_KEY, so a subscription worker never
-#   inherits a proxy the supervisor itself was switched to by hand. On
+#   launch, gateway or not, sheds the supervisor's ANTHROPIC_BASE_URL, so a
+#   subscription worker never inherits a proxy the supervisor itself was
+#   switched to by hand; a gateway launch also sheds ANTHROPIC_AUTH_TOKEN and
+#   ANTHROPIC_API_KEY so no inherited key outranks the helper. On
 #   --relaunch the recorded gateway is preserved unless --gateway names a new
 #   value (none drops it); a preserved gateway is validated against the
 #   replacement profile exactly like a fresh one, so a new harness or an
@@ -4900,10 +4901,10 @@ esac
 LAUNCH=${LAUNCH//__WORKTREE__/$sq_worktree}
 case "$HARNESS" in
 claude)
-  # Every claude launch also sheds the supervisor's Anthropic endpoint
-  # credentials, and a gateway launch maps Claude Code's model roles onto the
-  # proxied model; bin/fm-claude-gateway-lib.sh owns both lists.
-  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $(fm_claude_gateway_scrub_flags) $CLAUDE_GATEWAY_ENV$LAUNCH"
+  # Every claude launch also sheds the supervisor's Anthropic endpoint, and a
+  # gateway launch also sheds its credentials and maps Claude Code's model
+  # roles onto the proxied model; bin/fm-claude-gateway-lib.sh owns the lists.
+  LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $(fm_claude_gateway_scrub_flags "$GATEWAY") $CLAUDE_GATEWAY_ENV$LAUNCH"
   ;;
 codex | opencode | pi | pi-signed | grok | kimi | gemini | muse | rovo | agy | devin)
   LAUNCH="env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $LAUNCH"

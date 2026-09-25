@@ -868,7 +868,8 @@ test_gateway_none_drops_the_recorded_gateway() {
   [ -z "$(meta_field "$dir" rl41 gateway)" ] || fail "--gateway none must drop the recorded gateway"
   [ "$(meta_field "$dir" rl41 model)" = sonnet ] || fail "the explicit model should be recorded"
   assert_no_grep "ANTHROPIC_DEFAULT_HAIKU_MODEL" "$dir/fake/literal" "a dropped gateway must map no model role"
-  assert_grep "-u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY" "$dir/fake/literal" "the subscription launch still sheds the supervisor endpoint credentials"
+  assert_grep "-u ANTHROPIC_BASE_URL CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" "$dir/fake/literal" "the subscription launch still sheds the supervisor endpoint"
+  assert_no_grep "ANTHROPIC_API_KEY" "$dir/fake/literal" "the subscription launch must leave the pane's credentials alone"
   pass "fm-control relaunch: --gateway none returns the task to the subscription"
 }
 

@@ -46,6 +46,8 @@ What the proxy makes of that for a non-Anthropic vendor is the proxy's contract,
 
 In the same tmux session, with the pane shell exporting `ANTHROPIC_BASE_URL=http://127.0.0.1:18317` plus sentinel `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` values, the no-gateway launch shape (`--model haiku`, no `--gateway`) started as `Haiku 4.5 · Claude Max`.
 Its Bash tool printed `BASE=unset KEY=unset TOKEN=unset`, and the relay recorded zero requests during that run.
+That run used an earlier no-gateway shape that also unset `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY`; the current no-gateway shape unsets only `ANTHROPIC_BASE_URL`, which is the variable that kept that worker off the relay, and leaves the pane's own credentials to Claude Code as they were before the gateway existed.
+This section has not been re-run with the current shape.
 
 ## Proxy model listing
 
@@ -56,5 +58,5 @@ The same request without the key answered 401.
 
 1. Start a relay in front of the proxy that logs request model and effort fields, and write a settings copy naming it under a scratch `HOME`.
 2. Compose the launch from `bin/fm-claude-gateway-lib.sh` with that `HOME`, run it in a disposable tmux server from a trusted worktree with `--setting-sources user,project` and `FM_ALLOW_SUBAGENT=1`, and prompt for one Agent call.
-3. Record every model name the relay saw, the effort form, and the auth header names; then repeat the no-gateway shape with the proxy variables exported in the pane shell and confirm the relay saw nothing and the worker's Bash reports them unset.
+3. Record every model name the relay saw, the effort form, and the auth header names; then repeat the no-gateway shape with `ANTHROPIC_BASE_URL` naming the relay in the pane shell and confirm the relay saw nothing and the worker's Bash reports it unset.
 4. Kill the tmux server and the relay; the key must not appear in any artifact.

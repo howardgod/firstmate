@@ -3,7 +3,7 @@
 # gateway for Claude Code workers: the accepted gateway names, the shared
 # settings file a gateway launch loads, every refusal, the per-launch
 # --settings merge, the model-mapping environment a gateway launch carries,
-# and the endpoint credentials every Claude launch sheds.
+# and the endpoint variables a Claude launch sheds.
 #
 # docs/configuration.md "Claude gateway (CLIProxyAPI)" owns the operator-facing
 # contract. Sourced by bin/fm-spawn.sh and bin/fm-control.sh; bin/fm-bootstrap.sh
@@ -13,10 +13,11 @@
 # dispatch profile may send another vendor's model through the local
 # CLIProxyAPI from the same Claude Code binary, so the fleet keeps one coding
 # agent. The proxy is selected per launch, never inherited from the supervisor:
-# the worker's environment is stripped of ANTHROPIC_BASE_URL,
-# ANTHROPIC_AUTH_TOKEN, and ANTHROPIC_API_KEY on every Claude launch, and a
-# gateway launch re-establishes the base URL and key helper only through the
-# shared settings file, so a key rotation or URL change edits one file.
+# every Claude launch sheds ANTHROPIC_BASE_URL, a gateway launch also sheds
+# ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY so no inherited key outranks the
+# helper, and a gateway launch re-establishes the base URL and key helper only
+# through the shared settings file, so a key rotation or URL change edits one
+# file. A launch without a gateway leaves the pane's own credentials alone.
 #
 # Settings file: $HOME/.claude/cliproxy-settings.json, a Claude Code settings
 # document whose `env.ANTHROPIC_BASE_URL` names the proxy and whose
@@ -55,10 +56,12 @@
 # Anthropic model name (docs/verification/claude-gateway.md records what the
 # installed version actually sends).
 
-# Endpoint credentials a Claude worker must never inherit from the supervisor
-# (a supervisor switched to the proxy by hand would otherwise leak its base
-# URL into a subscription worker).
-FM_CLAUDE_GATEWAY_SCRUB="ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY"
+# The endpoint a Claude worker must never inherit (a supervisor switched to
+# the proxy by hand would otherwise leak its base URL into a subscription
+# worker), and the credentials a gateway worker must never inherit (they would
+# outrank the helper key and reach the proxy).
+FM_CLAUDE_GATEWAY_SCRUB="ANTHROPIC_BASE_URL"
+FM_CLAUDE_GATEWAY_CREDENTIAL_SCRUB="ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY"
 
 # An Anthropic model, tested case-insensitively: a claude prefix, or one of
 # Claude Code's own aliases with or without the [1m] suffix.
@@ -79,12 +82,13 @@ fm_claude_gateway_settings_path() {
   printf '%s\n' "${HOME:?HOME is unset}/.claude/cliproxy-settings.json"
 }
 
-# fm_claude_gateway_scrub_flags
-# Prints the `env` -u flags that shed the endpoint credentials above; every
-# Claude launch carries them, with or without a gateway.
+# fm_claude_gateway_scrub_flags <gateway>
+# Prints the `env` -u flags a Claude launch carries: the endpoint above on
+# every launch, plus the credentials above when <gateway> is non-empty.
 fm_claude_gateway_scrub_flags() {
-  local var flags=
-  for var in $FM_CLAUDE_GATEWAY_SCRUB; do
+  local var flags= vars=$FM_CLAUDE_GATEWAY_SCRUB
+  [ -z "$1" ] || vars="$vars $FM_CLAUDE_GATEWAY_CREDENTIAL_SCRUB"
+  for var in $vars; do
     flags="$flags${flags:+ }-u $var"
   done
   printf '%s\n' "$flags"
