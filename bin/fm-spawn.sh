@@ -2372,7 +2372,7 @@ CLAUDE_SETTINGS=$CLAUDE_WORKER_SETTINGS
 CLAUDE_GATEWAY_ENV=
 if [ -n "$GATEWAY" ]; then
   fm_claude_gateway_validate "$GATEWAY" "$HARNESS" "$KIND" "$MODEL" "$RAW_LAUNCH" || exit 1
-  CLAUDE_SETTINGS=$(fm_claude_gateway_settings "$CLAUDE_WORKER_SETTINGS") || {
+  CLAUDE_SETTINGS=$(fm_claude_gateway_settings "$CLAUDE_WORKER_SETTINGS" "$MODEL") || {
     echo "error: --gateway cliproxy could not merge $(fm_claude_gateway_settings_path) into the launch settings" >&2
     exit 1
   }

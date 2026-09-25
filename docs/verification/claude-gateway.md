@@ -12,6 +12,7 @@ Verified 2026-09-25 on Claude Code 2.1.282 against CLIProxyAPI listening on `127
 A logging relay listened on `127.0.0.1:18317`, forwarded every byte to the proxy, and logged one line per request on the client-to-proxy direction: the request line, which auth header names were present (never their values), the `anthropic-beta` header, and the `model`, `thinking`, `output_config`, `max_tokens`, message-count, and tool-count fields of each JSON body.
 A test copy of the shared settings file named the relay as its base URL and kept the real `apiKeyHelper` command, so the worker authenticated with the real key while every request was observed.
 The launch was the command `bin/fm-spawn.sh --harness claude --model gpt-6-sol --effort high --gateway cliproxy` produces, composed from the library's own `fm_claude_gateway_scrub_flags`, `fm_claude_gateway_env_prefix`, and `fm_claude_gateway_settings` with `HOME` pointed at the test copy, and run interactively in a disposable `tmux -L fmgw` server from the task worktree.
+The relay evidence below was gathered with the model roles carried in the process environment only; the launch now also writes them into the merged settings `env`.
 Two additions kept the probe from disturbing the fleet: `--setting-sources user,project` so the worktree's own per-task Stop hooks did not fire, and `FM_ALLOW_SUBAGENT=1` so the tracked subagent guard admitted the Agent call.
 The prompt asked for exactly one Agent call (`general-purpose`, "Reply with exactly the word PONG and nothing else") and then the words PONG and DONE.
 

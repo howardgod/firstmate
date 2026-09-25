@@ -6,7 +6,8 @@
 # and the endpoint credentials every Claude launch sheds.
 #
 # docs/configuration.md "Claude gateway (CLIProxyAPI)" owns the operator-facing
-# contract. Sourced by bin/fm-spawn.sh and bin/fm-control.sh.
+# contract. Sourced by bin/fm-spawn.sh and bin/fm-control.sh; bin/fm-bootstrap.sh
+# and bin/fm-dispatch-resolve.sh source it for FM_CLAUDE_GATEWAY_ANTHROPIC_MODEL_RE.
 #
 # Why: Anthropic models keep using Claude Code's own subscription, while a
 # dispatch profile may send another vendor's model through the local
@@ -31,24 +32,40 @@
 #     receive the merged --settings
 #   - a --secondmate spawn: a secondmate's profile comes from
 #     config/secondmate-harness, which carries no gateway token
-#   - no model, or a model starting with `claude`: an Anthropic model never
-#     goes through the proxy (Anthropic ToS), and Claude Code's default model
-#     is an Anthropic model
+#   - no model, or an Anthropic model (a claude prefix or one of Claude Code's
+#     own aliases, matched case-insensitively by
+#     FM_CLAUDE_GATEWAY_ANTHROPIC_MODEL_RE): an Anthropic model never goes
+#     through the proxy (Anthropic ToS), and Claude Code's default model is an
+#     Anthropic model; bin/fm-bootstrap.sh and bin/fm-dispatch-resolve.sh test
+#     profiles against the same pattern
 #   - a missing, unreadable, non-JSON settings file, or one lacking a
 #     non-empty env.ANTHROPIC_BASE_URL string or apiKeyHelper string
+#   - a settings file whose env carries ANTHROPIC_API_KEY,
+#     ANTHROPIC_AUTH_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN: the whole file rides
+#     the launch command, so the key belongs behind apiKeyHelper
 #   - jq absent, since the merge needs it
 #
-# A gateway launch also exports ANTHROPIC_DEFAULT_HAIKU_MODEL,
-# ANTHROPIC_DEFAULT_SONNET_MODEL, ANTHROPIC_DEFAULT_OPUS_MODEL, and
-# CLAUDE_CODE_SUBAGENT_MODEL, all set to the profile model, so Claude Code's
-# background calls and subagents ask the proxy for the chosen model instead of
-# a built-in Anthropic model name (docs/verification/claude-gateway.md records
-# what the installed version actually sends).
+# A gateway launch maps Claude Code's model roles (FM_CLAUDE_GATEWAY_MODEL_ROLES:
+# ANTHROPIC_DEFAULT_HAIKU_MODEL, ANTHROPIC_DEFAULT_SONNET_MODEL,
+# ANTHROPIC_DEFAULT_OPUS_MODEL, and CLAUDE_CODE_SUBAGENT_MODEL) onto the
+# profile model in two places: the launch-prefix environment and the merged
+# settings env, where they are applied after the shared file so a role the
+# file names never wins over the profile model. Claude Code's background calls
+# and subagents then ask the proxy for the chosen model instead of a built-in
+# Anthropic model name (docs/verification/claude-gateway.md records what the
+# installed version actually sends).
 
 # Endpoint credentials a Claude worker must never inherit from the supervisor
 # (a supervisor switched to the proxy by hand would otherwise leak its base
 # URL into a subscription worker).
 FM_CLAUDE_GATEWAY_SCRUB="ANTHROPIC_BASE_URL ANTHROPIC_AUTH_TOKEN ANTHROPIC_API_KEY"
+
+# An Anthropic model, tested case-insensitively: a claude prefix, or one of
+# Claude Code's own aliases with or without the [1m] suffix.
+FM_CLAUDE_GATEWAY_ANTHROPIC_MODEL_RE='^(claude|(default|opus|sonnet|haiku|opusplan|best)(\[1m\])?$)'
+
+# Claude Code's model roles a gateway launch maps onto the profile model.
+FM_CLAUDE_GATEWAY_MODEL_ROLES="ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL CLAUDE_CODE_SUBAGENT_MODEL"
 
 fm_claude_gateway_quote() {
   printf "'"
@@ -102,12 +119,10 @@ fm_claude_gateway_validate() {
     echo "error: --gateway cliproxy needs an explicit non-Anthropic --model: Claude Code's default model is an Anthropic model, which never goes through the proxy" >&2
     return 1
   fi
-  case "$model" in
-  claude*)
+  if [[ "$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')" =~ $FM_CLAUDE_GATEWAY_ANTHROPIC_MODEL_RE ]]; then
     echo "error: --gateway cliproxy refuses model '$model': Anthropic models stay on Claude Code's own subscription and never go through CLIProxyAPI (Anthropic terms of service)" >&2
     return 1
-    ;;
-  esac
+  fi
   settings=$(fm_claude_gateway_settings_path)
   if [ ! -f "$settings" ]; then
     echo "error: --gateway cliproxy needs the shared proxy settings file $settings (env.ANTHROPIC_BASE_URL plus apiKeyHelper); it is missing" >&2
@@ -130,26 +145,33 @@ fm_claude_gateway_validate() {
     echo "error: --gateway cliproxy needs $settings to be a JSON object with a non-empty env.ANTHROPIC_BASE_URL string and a non-empty apiKeyHelper string" >&2
     return 1
   fi
+  if jq -e '.env | has("ANTHROPIC_API_KEY") or has("ANTHROPIC_AUTH_TOKEN") or has("CLAUDE_CODE_OAUTH_TOKEN")' "$settings" >/dev/null 2>&1; then
+    echo "error: --gateway cliproxy refuses $settings: its env carries ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or CLAUDE_CODE_OAUTH_TOKEN, and a credential in the file would enter the launch command; the key belongs behind apiKeyHelper" >&2
+    return 1
+  fi
   return 0
 }
 
-# fm_claude_gateway_settings <base-settings-json>
+# fm_claude_gateway_settings <base-settings-json> <model>
 # Prints the launch's inline --settings JSON: the base worker settings with
-# the shared settings file merged over them (compact, one line). Validate first.
+# the shared settings file merged over them and the model roles set to the
+# profile model last, so the file never overrides them (compact, one line).
+# Validate first.
 fm_claude_gateway_settings() {
-  local base=$1 settings
+  local base=$1 model=$2 settings
   settings=$(fm_claude_gateway_settings_path)
-  jq -c --argjson base "$base" '$base * .' "$settings"
+  jq -c --argjson base "$base" --arg m "$model" --arg roles "$FM_CLAUDE_GATEWAY_MODEL_ROLES" \
+    '$base * . * {env: ($roles | split(" ") | map({key: ., value: $m}) | from_entries)}' "$settings"
 }
 
 # fm_claude_gateway_env_prefix <model>
 # Prints the launch-prefix assignments that map Claude Code's built-in model
 # roles onto the proxied model.
 fm_claude_gateway_env_prefix() {
-  local model quoted
+  local role quoted
   quoted=$(fm_claude_gateway_quote "$1")
-  for model in ANTHROPIC_DEFAULT_HAIKU_MODEL ANTHROPIC_DEFAULT_SONNET_MODEL ANTHROPIC_DEFAULT_OPUS_MODEL CLAUDE_CODE_SUBAGENT_MODEL; do
-    printf '%s=%s ' "$model" "$quoted"
+  for role in $FM_CLAUDE_GATEWAY_MODEL_ROLES; do
+    printf '%s=%s ' "$role" "$quoted"
   done
   printf '\n'
 }

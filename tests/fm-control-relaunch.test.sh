@@ -855,6 +855,7 @@ test_same_harness_relaunch_keeps_the_gateway() {
   [ "$(meta_field "$dir" rl40 model)" = gpt-6-sol ] || fail "the model should carry across a same-harness relaunch"
   assert_grep "ANTHROPIC_DEFAULT_HAIKU_MODEL='gpt-6-sol'" "$dir/fake/literal" "the replacement launch should map the model roles onto the proxied model"
   assert_grep "cliproxy-api-key" "$dir/fake/literal" "the replacement launch should carry the merged proxy settings"
+  assert_grep '"ANTHROPIC_DEFAULT_OPUS_MODEL":"gpt-6-sol"' "$dir/fake/literal" "the replacement launch settings should map the model roles onto the proxied model"
   pass "fm-control relaunch: a same-harness relaunch keeps the recorded Claude gateway"
 }
 
@@ -894,6 +895,11 @@ test_kept_gateway_refuses_an_anthropic_model_before_stop() {
   [ ! -e "$dir/home/state/rl43.control-relaunch" ] || fail "a refusal before the checkpoint must leave no journal"
   [ "$(meta_field "$dir" rl43 gateway)" = cliproxy ] || fail "the record must be untouched"
   [ "$(meta_field "$dir" rl43 model)" = gpt-6-sol ] || fail "the recorded model must be untouched"
+  out=$(run_control "$dir" rl43 relaunch --model 'sonnet[1m]' --note "alias turn"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a kept gateway with a Claude Code alias model must refuse"$'\n'"$out"
+  assert_contains "$out" "never go through CLIProxyAPI" "the alias refusal should say why"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "the running agent must not be stopped by a refused alias relaunch"
+  [ "$(meta_field "$dir" rl43 model)" = gpt-6-sol ] || fail "the recorded model must be untouched by the alias refusal"
   pass "fm-control relaunch: a kept gateway refuses an Anthropic model before anything stops"
 }
 

@@ -1418,7 +1418,8 @@ test_claude_gateway_launch_merges_proxy_settings_and_maps_model_roles() {
   id=gateway-claude-z30
   rec=$(make_spawn_case gateway-claude claude "$id")
   read_case_record "$rec"
-  write_gateway_settings "$HOME_DIR"
+  # The file names its own opus role on purpose: the profile model must win.
+  write_gateway_settings "$HOME_DIR" '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8317","ANTHROPIC_DEFAULT_OPUS_MODEL":"gpt-file-model"},"apiKeyHelper":"cat ~/.claude/cliproxy-api-key"}'
 
   # The supervisor's own endpoint credentials are set here on purpose: none of
   # them may reach the launch, which re-establishes the proxy only through the
@@ -1445,7 +1446,11 @@ test_claude_gateway_launch_merges_proxy_settings_and_maps_model_roles() {
     and .attribution == {"commit": "", "pr": "", "sessionUrl": false}
     and .env.ANTHROPIC_BASE_URL == "http://127.0.0.1:8317"
     and .apiKeyHelper == "cat ~/.claude/cliproxy-api-key"
-  ' >/dev/null || fail "the one inline --settings must carry the worker policy with the proxy file merged over it, got: $settings"
+    and .env.ANTHROPIC_DEFAULT_HAIKU_MODEL == "gpt-6-sol"
+    and .env.ANTHROPIC_DEFAULT_SONNET_MODEL == "gpt-6-sol"
+    and .env.ANTHROPIC_DEFAULT_OPUS_MODEL == "gpt-6-sol"
+    and .env.CLAUDE_CODE_SUBAGENT_MODEL == "gpt-6-sol"
+  ' >/dev/null || fail "the one inline --settings must carry the worker policy with the proxy file merged over it and every model role on the profile model, got: $settings"
   assert_contains "$launch" "' $CLAUDE_CONTROL_CHANNEL_FLAG --model 'gpt-6-sol' --effort 'high' " \
     "gateway launch must keep the canonical claude shape after the settings"
   assert_not_contains "$launch" "$GATEWAY_KEY_SENTINEL" "the proxy key must never appear in the launch command"
@@ -1466,6 +1471,12 @@ test_claude_gateway_refusals_land_before_any_record() {
   status=$?
   assert_gateway_refusal "$id" "$out" "$status" "applies only to --harness claude"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --model claude-sonnet-5 --gateway cliproxy)
+  status=$?
+  assert_gateway_refusal "$id" "$out" "$status" "never go through CLIProxyAPI"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --model opus --gateway cliproxy)
+  status=$?
+  assert_gateway_refusal "$id" "$out" "$status" "never go through CLIProxyAPI"
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --model Claude-Sonnet-5 --gateway cliproxy)
   status=$?
   assert_gateway_refusal "$id" "$out" "$status" "never go through CLIProxyAPI"
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --gateway cliproxy)
@@ -1497,7 +1508,12 @@ test_claude_gateway_refuses_an_unusable_settings_file() {
   out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --model gpt-6-sol --gateway cliproxy)
   status=$?
   assert_gateway_refusal "$id" "$out" "$status" "non-empty env.ANTHROPIC_BASE_URL string"
-  pass "--gateway cliproxy refuses a missing, empty-URL, or non-JSON proxy settings file before any record"
+  write_gateway_settings "$HOME_DIR" '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8317","ANTHROPIC_API_KEY":"'"$GATEWAY_KEY_SENTINEL"'"},"apiKeyHelper":"cat ~/.claude/cliproxy-api-key"}'
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --model gpt-6-sol --gateway cliproxy)
+  status=$?
+  assert_gateway_refusal "$id" "$out" "$status" "a credential in the file would enter the launch command"
+  assert_not_contains "$out" "$GATEWAY_KEY_SENTINEL" "the refusal must not echo the credential"
+  pass "--gateway cliproxy refuses a missing, empty-URL, non-JSON, or credential-bearing proxy settings file before any record"
 }
 
 test_claude_gateway_refuses_a_secondmate_spawn() {
