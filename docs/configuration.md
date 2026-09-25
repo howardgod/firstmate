@@ -417,6 +417,39 @@ Pins are not inherited into secondmate homes: a local secondmate agent launches 
 A remote secondmate is launched on its host from its own home's configuration, so create the file in that remote home.
 [`bin/fm-worker-account-lib.sh`](../bin/fm-worker-account-lib.sh) owns parsing, the sign-in check, and the full list of credentials a Claude launch unsets; [runtime backend verification](verification/runtime-backends.md#worker-account-pin-sign-in-check) records the check against the real runners.
 
+## Claude gateway (CLIProxyAPI)
+
+A dispatch profile can send a Claude Code crewmate or scout through the local [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) so another vendor's model runs on the one coding agent the fleet maintains.
+Anthropic models never go through the proxy: they keep using Claude Code's own subscription, and the fleet's Anthropic account is not signed in to the proxy.
+The gateway is opt-in per launch through the profile field `"gateway": "cliproxy"` ([crew dispatch profiles](#crew-dispatch-profiles-configcrew-dispatchjson)) or the equivalent `fm-spawn.sh --gateway cliproxy`, and it is honored only for `--harness claude`; when Anthropic quota runs out, a rule or default carrying a gateway profile is what keeps dispatch able to pick a working Claude Code worker.
+
+One shared settings file, `~/.claude/cliproxy-settings.json` under the launching user's home, carries the proxy contract: a Claude Code settings document whose `env.ANTHROPIC_BASE_URL` names the proxy (`http://127.0.0.1:8317`) and whose `apiKeyHelper` command prints the key, for example `cat ~/.claude/cliproxy-api-key`.
+Rotating the key edits that one key file; moving the proxy edits that one settings file; the same file can later switch other Claude sessions to the proxy by hand.
+A gateway launch merges that file over the worker policy Firstmate already passes as inline `--settings` (feedback drafts off, attribution off), so the launch carries exactly one `--settings` value.
+It also sets `ANTHROPIC_DEFAULT_HAIKU_MODEL`, `ANTHROPIC_DEFAULT_SONNET_MODEL`, `ANTHROPIC_DEFAULT_OPUS_MODEL`, and `CLAUDE_CODE_SUBAGENT_MODEL` to the profile model, both in the launch environment and in the merged settings `env`, so Claude Code's background calls and subagents ask the proxy for the chosen model instead of a built-in Anthropic model name; [the verification record](verification/claude-gateway.md) shows what the installed version actually sent.
+The merge applies those model roles after the settings file, so a model role the file itself names never overrides the profile model, while any other `env` entry in the file reaches every gateway launch.
+The key never appears in a launch command, a task record, a status line, or a log: only the settings file path and the helper command do.
+
+Every Claude launch from this home, gateway or not, unsets `ANTHROPIC_BASE_URL` for the worker, so a worker on the subscription never inherits a proxy the supervising session was itself switched to.
+A gateway launch also unsets `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY`, so no inherited key outranks the helper key, and re-establishes the base URL and key only through the settings file.
+A launch without the gateway leaves the pane's own credentials alone, exactly as before the gateway existed.
+Model-role variables are not unset on a subscription launch, so an `ANTHROPIC_DEFAULT_*_MODEL` the captain sets for the subscription still reaches those workers.
+
+The spawn refuses, before any endpoint, local copy, or task record exists, and names the reason, when the gateway is anything but `cliproxy`; the harness is not `claude`, including a raw launch command, which cannot receive the merged settings; the spawn is `--secondmate`, whose profile comes from `config/secondmate-harness`; no model is named, because Claude Code's default is an Anthropic model; the model is an Anthropic model, meaning it starts with `claude` in any letter case or is one of Claude Code's own aliases `default`, `opus`, `sonnet`, `haiku`, `opusplan`, or `best`, with or without a `[1m]` suffix; the settings file is missing, unreadable, not a JSON object, or lacks a non-empty `env.ANTHROPIC_BASE_URL` or `apiKeyHelper` string; the settings file's `env` carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, or `CLAUDE_CODE_OAUTH_TOKEN`, because a credential in the file would enter the launch command and the key belongs behind `apiKeyHelper`; or `jq`, which performs the merge, is absent.
+A gateway launch records `gateway=cliproxy` in the task record and prints it on the spawned line; every other record omits the line.
+A relaunch keeps the recorded gateway unless `--gateway` names a new value (`none` drops it) or the harness changes, and a kept gateway is validated against the replacement profile before the old worker stops, so returning a proxied task to the subscription takes an explicit `--gateway none` with an Anthropic model ([agent control](agent-control.md#transactional-relaunch)).
+A direct `fm-spawn.sh --relaunch` that keeps a recorded gateway must also name the model; the control plane passes it.
+
+Known limits:
+
+- Anthropic server-side tools such as WebSearch and WebFetch run on Anthropic's servers and do not work through the proxy.
+- Claude Code warns that a proxied model is not in its catalog and assumes a 200k-token context window; the proxy's `/v1/models` listing carries no context-window field, so Firstmate does not set `CLAUDE_CODE_MAX_CONTEXT_TOKENS` per model, and a model with a smaller real window can fail late on a long conversation.
+  A captain who knows a model's real window can put `CLAUDE_CODE_MAX_CONTEXT_TOKENS` in the settings file's `env`, where it reaches every gateway launch.
+- Claude Code's own effort flag reaches the proxy in the form the verification record shows for the installed version; the proxy and the vendor decide what that means for a non-Anthropic model.
+- The `claude.ai connectors are disabled` banner on a gateway worker is expected: the helper key outranks the claude.ai login for that session.
+
+[`bin/fm-claude-gateway-lib.sh`](../bin/fm-claude-gateway-lib.sh) owns the settings path, every refusal, the merge, and the model-role and scrubbed variable lists; [`bin/fm-spawn.sh`](../bin/fm-spawn.sh) and [`bin/fm-control.sh`](../bin/fm-control.sh) apply them, with regression coverage in [`tests/fm-spawn-dispatch-profile.test.sh`](../tests/fm-spawn-dispatch-profile.test.sh) and [`tests/fm-control-relaunch.test.sh`](../tests/fm-control-relaunch.test.sh); the [Claude adapter reference](../.agents/skills/harness-adapters/references/harness/claude.md#cliproxyapi-gateway) records the harness-side facts.
+
 ## Lavish server address (config/lavish-axi-host)
 
 The optional local, gitignored `config/lavish-axi-host` contains one non-empty address without whitespace for the per-machine Lavish server.
@@ -507,7 +540,8 @@ This section is the single owner of the canonical schema and its per-field seman
       "min_confidence": 0.85,
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
-        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } }
+        { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } },
+        { "harness": "claude", "model": "<non-Anthropic model the proxy serves>", "effort": "<optional effort>", "provider": "<quota-axi provider of that model's vendor>", "gateway": "cliproxy" }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
@@ -523,6 +557,9 @@ Both `use` and the optional top-level `default` accept either one profile object
 The single-object form stays fully backward-compatible, and every profile needs `harness`.
 Profile `model` and `effort` fields and rule `why` are optional.
 Rule `approval`, `min_confidence`, and `floor`, and profile `provider` and `floor` are optional declarations that only [typed dispatch resolution](#typed-dispatch-resolution-env-typesafe_api_key) applies in code; without that opt-in they are inert, and firstmate's own intake reads them as ordinary hints.
+Profile `gateway` is the one other optional field, and its only accepted value is `cliproxy`: the profile is Claude Code launched through the local CLIProxyAPI on another vendor's model, which [Claude gateway (CLIProxyAPI)](#claude-gateway-cliproxyapi) owns.
+A gateway profile must name `harness` `claude`, a `model` that is not an Anthropic model (a `claude` prefix in any letter case or one of Claude Code's own aliases, the same rule [Claude gateway (CLIProxyAPI)](#claude-gateway-cliproxyapi) states), and a `provider` other than `claude` naming the vendor whose quota-axi rows the candidate spends; bootstrap and the typed resolver reject every other shape whether or not typed resolution is active, and firstmate passes the profile to `fm-spawn.sh` as `--harness claude --model <model> --gateway cliproxy`.
+Every quota reader treats a gateway candidate by that declared provider, never as Claude: the typed resolver ranks it on the provider's rows, [`quota-array-dispatch`](../.agents/skills/quota-array-dispatch/SKILL.md#1-eligibility) establishes its model from the proxy's listing, and `bin/fm-quota-choose.sh`, which has no gateway token, is not usable for it.
 The resolver supplies the fixed neutral Choice option `No listed rule applies to this task.` for work that matches no listed rule.
 `approval` accepts only `"captain"` and means a task the rule matches is never dispatched from the tool's answer alone.
 `min_confidence` is a number from 0 through 1 that the rule's own probability in the answer must reach, in place of the resolver's global 0.6 floor on the answer's confidence; set it high on a rule whose wrong pick is costly and low on a rule that is a safe runner-up.
@@ -548,7 +585,7 @@ Bootstrap reports unsupported harness/model/effort combinations as a `CREW_DISPA
 See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a starting point to copy into local `config/crew-dispatch.json`; its Pi default declares the `claude` provider required for typed resolution of that Anthropic model.
 When the file exists, bootstrap validates it with `jq`.
 Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, or an effort value unsupported by that harness is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
+Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, an effort value unsupported by that harness, or a `gateway` field that is not `cliproxy` on a claude profile with a non-Anthropic model and a non-claude provider is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
 While typed resolution is active, malformed `approval`, `min_confidence`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
 Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.

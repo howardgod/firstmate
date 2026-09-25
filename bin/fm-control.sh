@@ -6,6 +6,7 @@
 #        fm-control.sh <task-id> exit
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
+#                                         [--gateway <cliproxy|none>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -76,6 +77,11 @@
 #              worker account pin (bin/fm-worker-account-lib.sh) here, so a pin
 #              that no longer resolves or is signed out refuses before the old
 #              agent stops.
+#              A recorded Claude gateway (gateway=cliproxy) follows the
+#              replacement unless --gateway names a new value (`none` drops
+#              it) or the harness changes, and a kept gateway is validated
+#              against the replacement profile here, before the old agent
+#              stops (bin/fm-claude-gateway-lib.sh owns those refusals).
 #              --note is required for a ship or scout, whose replacement
 #              inherits the local copy but none of the conversation; a
 #              secondmate reconciles its own home's records at startup, so its
@@ -176,6 +182,8 @@ DATA="${FM_DATA_OVERRIDE:-$FM_HOME/data}"
 . "$SCRIPT_DIR/fm-wake-lib.sh"
 # shellcheck source=bin/fm-worker-account-lib.sh
 . "$SCRIPT_DIR/fm-worker-account-lib.sh"
+# shellcheck source=bin/fm-claude-gateway-lib.sh
+. "$SCRIPT_DIR/fm-claude-gateway-lib.sh"
 
 POLL=${FM_CONTROL_POLL:-0.5}
 SETTLE_WAIT=${FM_CONTROL_SETTLE_WAIT:-5}
@@ -233,9 +241,11 @@ fi
 NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
+NEW_GATEWAY=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
+GATEWAY_SET=0
 NOTE=
 NOTE_SET=0
 control_want_value=
@@ -248,6 +258,7 @@ for control_arg in "$@"; do
       harness) NEW_HARNESS=$control_arg; HARNESS_SET=1 ;;
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
+      gateway) NEW_GATEWAY=$control_arg; GATEWAY_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
@@ -265,6 +276,8 @@ for control_arg in "$@"; do
     --model=*) NEW_MODEL=${control_arg#--model=}; MODEL_SET=1 ;;
     --effort) control_want_value=effort ;;
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
+    --gateway) control_want_value=gateway ;;
+    --gateway=*) NEW_GATEWAY=${control_arg#--gateway=}; GATEWAY_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -282,15 +295,20 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$GATEWAY_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--harness, --model, --effort, --gateway, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
+[ "$GATEWAY_SET" = 0 ] || [ -n "$NEW_GATEWAY" ] || die "--gateway requires a non-empty value"
 case "$NEW_EFFORT" in
   ''|default|low|medium|high|xhigh|max|ultra) ;;
   *) die "--effort must be one of default, low, medium, high, xhigh, max, ultra" ;;
+esac
+case "$NEW_GATEWAY" in
+  ''|cliproxy|none) ;;
+  *) die "--gateway must be cliproxy or none" ;;
 esac
 
 # --- exact task-id resolution ----------------------------------------------
@@ -782,6 +800,7 @@ resolve_relaunch_profile() {
   PRIOR_RECORDED_HARNESS=$RECORDED_HARNESS
   PRIOR_MODEL=$(fm_meta_get "$META" model)
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
+  PRIOR_GATEWAY=$(fm_meta_get "$META" gateway)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
   if [ "$HARNESS_SET" = 0 ] \
@@ -851,11 +870,27 @@ resolve_relaunch_profile() {
   if [ "$TARGET_EFFORT" = ultra ]; then
     "$SCRIPT_DIR/fm-harness.sh" validate-native-effort "$TARGET_HARNESS" "$TARGET_MODEL" "$TARGET_EFFORT" || return 1
   fi
+  # The gateway is bound to the claude launch the same way model and effort
+  # are: an explicit --gateway wins (`none` drops it), a harness change resets
+  # it, and otherwise the recorded one follows. A kept or newly named gateway
+  # is validated against the replacement profile here, before the old agent
+  # stops, with the same checks the launch owner applies.
+  local account_model=$TARGET_MODEL
+  [ "$account_model" != default ] || account_model=
+  if [ "$GATEWAY_SET" = 1 ]; then
+    TARGET_GATEWAY=$NEW_GATEWAY
+  elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ]; then
+    TARGET_GATEWAY=$PRIOR_GATEWAY
+  else
+    TARGET_GATEWAY=none
+  fi
+  [ "$TARGET_GATEWAY" != none ] || TARGET_GATEWAY=
+  if [ -n "$TARGET_GATEWAY" ]; then
+    fm_claude_gateway_validate "$TARGET_GATEWAY" "$TARGET_HARNESS" "$KIND" "$account_model" 0 || return 1
+  fi
   # The launch owner applies this home's worker account pin too, but only after
   # the old agent has been stopped, so a pin that no longer resolves or is
   # signed out must refuse here, while nothing has changed yet.
-  local account_model=$TARGET_MODEL
-  [ "$account_model" != default ] || account_model=
   fm_worker_account_select "$TARGET_HARNESS" "${FM_CONFIG_OVERRIDE:-$FM_HOME/config}" \
     "$account_model" "$TARGET_HARNESS" >/dev/null || return 1
 }
@@ -1008,6 +1043,13 @@ do_relaunch() {
   spawn_args=("$ID" --relaunch --harness "$TARGET_HARNESS")
   [ "$TARGET_MODEL" = default ] || spawn_args+=(--model "$TARGET_MODEL")
   [ "$TARGET_EFFORT" = default ] || spawn_args+=(--effort "$TARGET_EFFORT")
+  # The launch owner preserves a recorded gateway on its own, so the flag is
+  # passed only when this resolution keeps or drops one.
+  if [ -n "$TARGET_GATEWAY" ]; then
+    spawn_args+=(--gateway "$TARGET_GATEWAY")
+  elif [ -n "$PRIOR_GATEWAY" ]; then
+    spawn_args+=(--gateway none)
+  fi
   if FM_CONTROL_RELAUNCH_TX="$RELAUNCH_TX" \
       "$SCRIPT_DIR/fm-spawn.sh" "${spawn_args[@]}" >/dev/null; then
     RELAUNCH_META_PUBLISHED=1
