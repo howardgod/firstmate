@@ -86,7 +86,7 @@ fm_claude_gateway_settings_path() {
 # Prints the `env` -u flags a Claude launch carries: the endpoint above on
 # every launch, plus the credentials above when <gateway> is non-empty.
 fm_claude_gateway_scrub_flags() {
-  local var flags= vars=$FM_CLAUDE_GATEWAY_SCRUB
+  local var flags='' vars=$FM_CLAUDE_GATEWAY_SCRUB
   [ -z "$1" ] || vars="$vars $FM_CLAUDE_GATEWAY_CREDENTIAL_SCRUB"
   for var in $vars; do
     flags="$flags${flags:+ }-u $var"
