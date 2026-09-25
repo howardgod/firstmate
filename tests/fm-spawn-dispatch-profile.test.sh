@@ -1460,6 +1460,28 @@ test_claude_gateway_launch_merges_proxy_settings_and_maps_model_roles() {
   pass "--gateway cliproxy merges the proxy settings into the one --settings, maps every model role, and records gateway=cliproxy"
 }
 
+test_claude_gateway_launch_keeps_ampersands_in_the_merged_settings() {
+  local rec id out status launch settings
+  id=gateway-ampersand-z35
+  rec=$(make_spawn_case gateway-ampersand claude "$id")
+  read_case_record "$rec"
+  write_gateway_settings "$HOME_DIR" '{"env":{"ANTHROPIC_BASE_URL":"http://127.0.0.1:8317/?a=1&b=2"},"apiKeyHelper":"cat ~/.claude/cliproxy-api-key","statusLine":{"type":"command","command":"printf a & b"}}'
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" \
+    --harness claude --model gpt-6-sol --gateway cliproxy)
+  status=$?
+  expect_code 0 "$status" "claude gateway spawn with ampersands in the settings should succeed"$'\n'"$out"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_not_contains "$launch" "__CLAUDESETTINGS__" "the settings placeholder must never survive into the launch"
+  settings=${launch#*--settings \'}
+  settings=${settings%%\'*}
+  printf '%s' "$settings" | jq -e '
+    .env.ANTHROPIC_BASE_URL == "http://127.0.0.1:8317/?a=1&b=2"
+    and .statusLine.command == "printf a & b"
+  ' >/dev/null || fail "the inline --settings must keep every ampersand from the proxy file, got: $settings"
+  pass "--gateway cliproxy keeps ampersands in the merged proxy settings intact"
+}
+
 test_claude_gateway_refusals_land_before_any_record() {
   local rec id out status
   id=gateway-refuse-z31
@@ -1699,5 +1721,6 @@ test_claude_gateway_refusals_land_before_any_record
 test_claude_gateway_refuses_an_unusable_settings_file
 test_claude_gateway_refuses_a_secondmate_spawn
 test_no_gateway_claude_launch_sheds_supervisor_endpoint_credentials
+test_claude_gateway_launch_keeps_ampersands_in_the_merged_settings
 
 echo "# all fm-spawn-dispatch-profile tests passed"
