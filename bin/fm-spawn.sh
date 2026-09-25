@@ -85,8 +85,11 @@
 #   CLIProxyAPI so another vendor's model runs on the same Claude Code binary.
 #   bin/fm-claude-gateway-lib.sh owns the shared settings file, every refusal
 #   (any other gateway name, a non-claude harness, a raw launch command, a
-#   --secondmate spawn, a missing model or one starting with claude, an unusable
-#   settings file, absent jq), the --settings merge, and the model-mapping
+#   --secondmate spawn, a missing or Anthropic model (a claude prefix or one of
+#   Claude Code's own aliases, matched case-insensitively by
+#   FM_CLAUDE_GATEWAY_ANTHROPIC_MODEL_RE), an unusable settings file or one
+#   whose env carries ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or
+#   CLAUDE_CODE_OAUTH_TOKEN, absent jq), the --settings merge, and the model-mapping
 #   environment; docs/configuration.md "Claude gateway (CLIProxyAPI)" owns the
 #   operator contract. Every refusal lands before any endpoint, worktree, or
 #   record exists. A gateway launch records gateway=cliproxy in the task record
