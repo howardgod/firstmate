@@ -542,13 +542,103 @@ cmd_silent() {
   [ "$content_rc" -eq 1 ]
 }
 
+# Perl shared by `read`, `answers` and `reconciles` so all three see the same
+# queued items. The published response frames them either as a
+# `prompts[N]{field,...}:` (or `feedback[N]{...}:`) header followed by exactly N
+# indented CSV rows whose quoted fields carry JSON-style escapes, or, when any
+# item carries nested details such as a text selection's target, as a
+# `prompts[N]:` header followed by N indented `- key: value` records.
+# read_prompts returns the declared count, the malformed count, and one hash per
+# well-formed item with its escapes decoded.
+PROMPTS_PERL='
+use strict; use warnings;
+sub read_prompts {
+  my ($path) = @_;
+  open my $fh, "<", $path or exit 1;
+  my (@fields, $want, @rows, @parsed, $format);
+  while (my $line = <$fh>) {
+    if (!defined $format) {
+      if ($line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/) {
+        ($want, @fields) = ($1, split /,/, $2);
+        $format = "csv";
+      } elsif ($line =~ /^prompts\[(\d+)\]:\s*$/) {
+        $want = $1;
+        $format = "list";
+      }
+      next;
+    }
+    last unless $line =~ /^\s/;
+    if ($format eq "list") {
+      if ($line =~ /^  - (uid|prompt|selector|tag|text):[ \t]*(.*)\s*$/) {
+        last if @parsed >= $want;
+        push @parsed, {};
+        $parsed[-1]{$1} = $2;
+      } elsif (@parsed && $line =~ /^    (uid|prompt|selector|tag|text):[ \t]*(.*)\s*$/) {
+        $parsed[-1]{$1} = $2;
+      }
+      next;
+    }
+    last if @rows >= $want;
+    chomp $line;
+    push @rows, $line;
+  }
+  close $fh;
+  $want = 0 unless defined $want;
+  my $malformed = 0;
+  if (defined $format && $format eq "list") {
+    my @valid;
+    for my $f (@parsed) {
+      if (grep { !exists $f->{$_} } qw(uid prompt selector tag text)) {
+        $malformed++;
+        next;
+      }
+      for my $value (values %$f) {
+        $value =~ s/^"(.*)"$/$1/s;
+        $value =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
+      }
+      push @valid, $f;
+    }
+    @parsed = @valid;
+  }
+  for my $row (@rows) {
+    $row =~ s/^\s+//;
+    my @vals;
+    while (length $row) {
+      if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
+        push @vals, $1;
+      } else {
+        $row =~ s/^([^,]*)//;
+        push @vals, $1;
+      }
+      last unless $row =~ s/^,//;
+    }
+    if (@vals > @fields) {
+      my ($preserve) = grep { $fields[$_] eq "prompt" } 0 .. $#fields;
+      ($preserve) = grep { $fields[$_] eq "text" } 0 .. $#fields unless defined $preserve;
+      if (defined $preserve) {
+        my $count = @vals - @fields + 1;
+        my @parts = splice @vals, $preserve, $count;
+        splice @vals, $preserve, 0, join(",", @parts);
+      }
+    }
+    if (@vals != @fields) {
+      $malformed++;
+      next;
+    }
+    s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @vals;
+    my %f;
+    $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
+    push @parsed, \%f;
+  }
+  return ($want, $malformed, @parsed);
+}
+'
+
 # Print `key<TAB>answer<TAB>label[<TAB>mode]` for each non-reconcile structured choice the
 # captain submitted in a captured result; the optional mode column relays the
-# card's declared close mode (`done` or `release`) to the keyed-answer intake. The published response frames queued feedback as
-# a `prompts[N]{field,...}:` header followed by exactly N indented CSV rows whose
-# quoted fields carry JSON-style escapes, so this reads the declared field ORDER
-# rather than assuming a fixed column, and takes only rows whose `tag` field is
-# `choice`. A freeform `message` row is captain prose and is deliberately never a
+# card's declared close mode (`done` or `release`) to the keyed-answer intake. It
+# reads items through read_prompts, by field name rather than a fixed column, and
+# takes only items whose `tag` field is `choice`. A freeform `message` row is captain prose and is deliberately never a
 # source of decision keys. A row that does not carry both a slug-shaped `question`
 # and the versioned `selection` and `note` fields inside its `Context data:` block
 # is skipped. A time-limited rollout branch accepts the old question/answer
@@ -561,43 +651,15 @@ cmd_choice_rows() {
   local selection=$1 file=${2-}
   [ -n "$file" ] || usage
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
-  perl -MJSON::PP -e '
+  perl -MJSON::PP -e "$PROMPTS_PERL"'
     use strict; use warnings;
     my ($selection, $path) = @ARGV;
-    open my $fh, "<", $path or exit 1;
-    my (@fields, $want, @rows);
-    while (my $line = <$fh>) {
-      if (!@fields) {
-        next unless $line =~ /^prompts\[(\d+)\]\{([^}]*)\}:\s*$/;
-        ($want, @fields) = ($1, split /,/, $2);
-        next;
-      }
-      last unless $line =~ /^\s/;
-      last if @rows >= $want;
-      chomp $line;
-      push @rows, $line;
-    }
-    close $fh;
+    my (undef, undef, @parsed) = read_prompts($path);
     my %seen;
     my @choices;
-    for my $row (@rows) {
-      $row =~ s/^\s+//;
-      my @vals;
-      while (length $row) {
-        if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
-          my $v = $1;
-          $v =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
-          push @vals, $v;
-        } else {
-          $row =~ s/^([^,]*)//;
-          push @vals, $1;
-        }
-        last unless $row =~ s/^,//;
-      }
-      my %f;
-      $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
-      next unless defined $f{tag} && $f{tag} eq "choice";
-      my $prompt = $f{prompt};
+    for my $f (@parsed) {
+      next unless defined $f->{tag} && $f->{tag} eq "choice";
+      my $prompt = $f->{prompt};
       next unless defined $prompt && $prompt =~ /Context data:\s*(\{.*\})/s;
       my $ctx = $1;
       my $data = eval { decode_json($ctx) };
@@ -637,7 +699,7 @@ cmd_choice_rows() {
           || ($data->{close} ne "done" && $data->{close} ne "release");
         $mode = $data->{close};
       }
-      my $label = defined $f{text} ? $f{text} : "";
+      my $label = defined $f->{text} ? $f->{text} : "";
       s/[\x00-\x1f\x7f]/ /g for ($answer, $note, $label);
       $label = substr($label, 0, 512);
       if (defined $seen{$key}) { $choices[$seen{$key}] = undef }
@@ -682,86 +744,10 @@ cmd_read() {
   [ -f "$file" ] && [ ! -L "$file" ] || die "result file does not exist: $file"
   lifecycle=$(cmd_classify "$file")
   session_ended=$(session_field "$file" session_ended)
-  perl -e '
+  perl -e "$PROMPTS_PERL"'
     use strict; use warnings;
     my ($path, $lifecycle, $session_ended) = @ARGV;
-    open my $fh, "<", $path or exit 1;
-    my (@fields, $want, @rows, @parsed, $format);
-    while (my $line = <$fh>) {
-      if (!defined $format) {
-        if ($line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/) {
-          ($want, @fields) = ($1, split /,/, $2);
-          $format = "csv";
-        } elsif ($line =~ /^prompts\[(\d+)\]:\s*$/) {
-          # Text selections arrive as indented records, with nested target details.
-          $want = $1;
-          $format = "list";
-        }
-        next;
-      }
-      last unless $line =~ /^\s/;
-      if ($format eq "list") {
-        if ($line =~ /^  - (uid|prompt|selector|tag|text):[ \t]*(.*)\s*$/) {
-          last if @parsed >= $want;
-          push @parsed, {};
-          $parsed[-1]{$1} = $2;
-        } elsif (@parsed && $line =~ /^    (uid|prompt|selector|tag|text):[ \t]*(.*)\s*$/) {
-          $parsed[-1]{$1} = $2;
-        }
-        next;
-      }
-      last if @rows >= $want;
-      chomp $line;
-      push @rows, $line;
-    }
-    close $fh;
-    $want = 0 unless defined $want;
-    my $malformed = 0;
-    if (defined $format && $format eq "list") {
-      my @valid;
-      for my $f (@parsed) {
-        if (grep { !exists $f->{$_} } qw(uid prompt selector tag text)) {
-          $malformed++;
-          next;
-        }
-        for my $value (values %$f) {
-          $value =~ s/^"(.*)"$/$1/s;
-          $value =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
-        }
-        push @valid, $f;
-      }
-      @parsed = @valid;
-    }
-    for my $row (@rows) {
-      $row =~ s/^\s+//;
-      my @vals;
-      while (length $row) {
-        if ($row =~ s/^"((?:[^"\\]|\\.)*)"//) {
-          push @vals, $1;
-        } else {
-          $row =~ s/^([^,]*)//;
-          push @vals, $1;
-        }
-        last unless $row =~ s/^,//;
-      }
-      if (@vals > @fields) {
-        my ($preserve) = grep { $fields[$_] eq "prompt" } 0 .. $#fields;
-        ($preserve) = grep { $fields[$_] eq "text" } 0 .. $#fields unless defined $preserve;
-        if (defined $preserve) {
-          my $count = @vals - @fields + 1;
-          my @parts = splice @vals, $preserve, $count;
-          splice @vals, $preserve, 0, join(",", @parts);
-        }
-      }
-      if (@vals != @fields) {
-        $malformed++;
-        next;
-      }
-      s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge for @vals;
-      my %f;
-      $f{$fields[$_]} = $vals[$_] for 0 .. $#fields;
-      push @parsed, \%f;
-    }
+    my ($want, $malformed, @parsed) = read_prompts($path);
     my $presented = scalar @parsed;
     my $complete = ($presented == $want && !$malformed) ? "yes" : "no";
     my @messages;
