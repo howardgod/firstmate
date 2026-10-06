@@ -686,22 +686,52 @@ cmd_read() {
     use strict; use warnings;
     my ($path, $lifecycle, $session_ended) = @ARGV;
     open my $fh, "<", $path or exit 1;
-    my (@fields, $want, @rows);
+    my (@fields, $want, @rows, @parsed, $format);
     while (my $line = <$fh>) {
-      if (!@fields) {
-        next unless $line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/;
-        ($want, @fields) = ($1, split /,/, $2);
+      if (!defined $format) {
+        if ($line =~ /^(?:prompts|feedback)\[(\d+)\]\{([^}]*)\}:\s*$/) {
+          ($want, @fields) = ($1, split /,/, $2);
+          $format = "csv";
+        } elsif ($line =~ /^prompts\[(\d+)\]:\s*$/) {
+          # Text selections arrive as indented records, with nested target details.
+          $want = $1;
+          $format = "list";
+        }
         next;
       }
       last unless $line =~ /^\s/;
-      last if defined($want) && @rows >= $want;
+      if ($format eq "list") {
+        if ($line =~ /^  - (uid|prompt|selector|tag|text):[ \t]*(.*)\s*$/) {
+          last if @parsed >= $want;
+          push @parsed, {};
+          $parsed[-1]{$1} = $2;
+        } elsif (@parsed && $line =~ /^    (uid|prompt|selector|tag|text):[ \t]*(.*)\s*$/) {
+          $parsed[-1]{$1} = $2;
+        }
+        next;
+      }
+      last if @rows >= $want;
       chomp $line;
       push @rows, $line;
     }
     close $fh;
     $want = 0 unless defined $want;
-    my @parsed;
     my $malformed = 0;
+    if (defined $format && $format eq "list") {
+      my @valid;
+      for my $f (@parsed) {
+        if (grep { !exists $f->{$_} } qw(uid prompt selector tag text)) {
+          $malformed++;
+          next;
+        }
+        for my $value (values %$f) {
+          $value =~ s/^"(.*)"$/$1/s;
+          $value =~ s/\\(.)/$1 eq "n" ? "\n" : $1 eq "t" ? "\t" : $1 eq "r" ? "\r" : $1/ge;
+        }
+        push @valid, $f;
+      }
+      @parsed = @valid;
+    }
     for my $row (@rows) {
       $row =~ s/^\s+//;
       my @vals;

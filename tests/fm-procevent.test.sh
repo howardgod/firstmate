@@ -3114,6 +3114,32 @@ cat > "$READ" <<'EOF'
 session:
   file: /review.html
   status: feedback
+prompts[1]:
+  - uid: "selected-1"
+    prompt: Explain the selected term
+    selector: "section#example > code"
+    tag: text
+    text: ExampleType
+    target:
+      type: text-range
+      text: ExampleType
+      start:
+        path[1]: 0
+EOF
+out=$(read_out) || fail "read failed on a text-selection prompt"
+assert_contains "$out" "declared_items: 1" "a text-selection prompt was not declared"
+assert_contains "$out" "presented_items: 1" "a text-selection prompt was not presented"
+assert_contains "$out" "complete: yes" "a text-selection prompt was not completely parsed"
+assert_contains "$out" "annotation_count: 1" "a text-selection prompt was not counted as an annotation"
+assert_contains "$out" "tag: text" "a text-selection prompt lost its tag"
+assert_contains "$out" "| ExampleType" "a text-selection prompt lost the selected text"
+assert_contains "$out" "| Explain the selected term" "a text-selection prompt lost the question"
+pass "read presents text-selection prompts and their selected text"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
   session_ended: true
   ended_by: user
 prompts[4]{uid,prompt,selector,tag,text}:
