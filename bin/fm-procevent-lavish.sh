@@ -550,6 +550,7 @@ cmd_silent() {
 # `prompts[N]:` header followed by N indented `- key: value` records.
 # read_prompts returns the declared count, the malformed count, and one hash per
 # well-formed item with its escapes decoded.
+# shellcheck disable=SC2016  # Perl program text: $path, $line and friends are Perl variables.
 PROMPTS_PERL='
 use strict; use warnings;
 sub read_prompts {
