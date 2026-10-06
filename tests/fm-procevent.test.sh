@@ -3114,6 +3114,65 @@ cat > "$READ" <<'EOF'
 session:
   file: /review.html
   status: feedback
+prompts[1]:
+  - uid: "selected-1"
+    prompt: Explain the selected term
+    selector: "section#example > code"
+    tag: text
+    text: ExampleType
+    target:
+      type: text-range
+      text: ExampleType
+      start:
+        path[1]: 0
+EOF
+out=$(read_out) || fail "read failed on a text-selection prompt"
+assert_contains "$out" "declared_items: 1" "a text-selection prompt was not declared"
+assert_contains "$out" "presented_items: 1" "a text-selection prompt was not presented"
+assert_contains "$out" "complete: yes" "a text-selection prompt was not completely parsed"
+assert_contains "$out" "annotation_count: 1" "a text-selection prompt was not counted as an annotation"
+assert_contains "$out" "tag: text" "a text-selection prompt lost its tag"
+assert_contains "$out" "| ExampleType" "a text-selection prompt lost the selected text"
+assert_contains "$out" "| Explain the selected term" "a text-selection prompt lost the question"
+pass "read presents text-selection prompts and their selected text"
+
+# One text selection list-encodes the whole round, so a choice beside it must
+# still reach the keyed-answer intake, not only the reader.
+cat > "$READ" <<'EOF'
+session:
+  file: /board.html
+  status: feedback
+prompts[2]:
+  - uid: "1"
+    prompt: "Option A\n\nContext data:\n{\n  \"schema\": \"fm-bearings-answer.v1\",\n  \"question\": \"q-1\",\n  \"selection\": \"opt-a\",\n  \"note\": \"\"\n}"
+    selector: section#call > form
+    tag: choice
+    text: Option A
+  - uid: selected-1
+    prompt: Explain the selected term
+    selector: section#example > code
+    tag: text
+    text: ExampleType
+    target:
+      type: text-range
+      text: ExampleType
+      start:
+        path[1]: 0
+EOF
+out=$("$ROOT/bin/fm-procevent-lavish.sh" answers "$READ") || fail "answers failed on a list-encoded round"
+[ "$out" = "$(printf 'q-1\topt-a\tOption A')" ] \
+  || fail "a choice beside a text selection did not reach the keyed answers: $out"
+out=$(read_out) || fail "read failed on a list-encoded round"
+assert_contains "$out" "presented_items: 2" "a list-encoded round did not present both items"
+assert_contains "$out" "complete: yes" "a list-encoded round was not completely parsed"
+assert_contains "$out" "tag: choice" "a list-encoded round lost its choice"
+assert_contains "$out" "| Explain the selected term" "a list-encoded round lost the selection question"
+pass "answers and read see the same items in a list-encoded round"
+
+cat > "$READ" <<'EOF'
+session:
+  file: /review.html
+  status: feedback
   session_ended: true
   ended_by: user
 prompts[4]{uid,prompt,selector,tag,text}:
