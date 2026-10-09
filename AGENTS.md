@@ -150,7 +150,7 @@ Route durable knowledge to its most specific owner:
 - Knowledge useful to almost every contributor to one project belongs in that project's committed `AGENTS.md`, which only deliberate human edits extend.
 - Knowledge general to every firstmate user belongs in this repo's shared tracked surface.
 
-Firstmate never writes a project's `AGENTS.md` directly.
+Firstmate never writes a project's `AGENTS.md` directly, except under hard rule 1's concrete captain-approved project operation exception.
 A crewmate edits a project's `AGENTS.md` or `CLAUDE.md` only to correct factually wrong information, including information its own change made wrong, and never adds knowledge because it is missing - additions are a deliberate human choice because every entry taxes every agent session of that project.
 A correction edits only the wrong text and never runs `bin/fm-ensure-agents-md.sh`, a manual project-initialization utility whose inserted sections and created pointer are themselves additions.
 Keep fleet delivery posture and captain-private strategy out of project memory.
