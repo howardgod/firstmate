@@ -4,7 +4,8 @@ Audience: maintainer verification.
 
 This record supports the `--gateway cliproxy` contract owned by [`../configuration.md`](../configuration.md) ("Claude gateway (CLIProxyAPI)") and the harness facts in the [Claude adapter reference](../../.agents/skills/harness-adapters/references/harness/claude.md#cliproxyapi-gateway).
 It records only what must be re-established when Claude Code, CLIProxyAPI, or the launch shape in `bin/fm-claude-gateway-lib.sh` changes: which model names a gateway worker sends through the proxy, how effort arrives, and that a launch without the gateway stays on the subscription.
-Deterministic coverage of the refusals, the settings merge, the model-role mapping, the credential scrub, and the recorded `gateway=` field lives in `tests/fm-spawn-dispatch-profile.test.sh`, `tests/fm-control-relaunch.test.sh`, `tests/fm-bootstrap.test.sh`, and `tests/fm-dispatch-resolve.test.sh`.
+Deterministic coverage of the refusals, the settings merge, the model-role mapping, the subscription model-role scrub, the provider-specific gateway exception, the credential scrub, and the recorded gateway/provider fields lives in `tests/fm-spawn-dispatch-profile.test.sh`, `tests/fm-control-relaunch.test.sh`, `tests/fm-bootstrap.test.sh`, and `tests/fm-dispatch-resolve.test.sh`.
+The Antigravity `claude-` model exception and subscription role scrub are covered by those launch tests, not by the dated live proxy probe below; no live request with either new launch shape is claimed here.
 
 ## Setup
 
@@ -46,8 +47,8 @@ What the proxy makes of that for a non-Anthropic vendor is the proxy's contract,
 
 In the same tmux session, with the pane shell exporting `ANTHROPIC_BASE_URL=http://127.0.0.1:18317` plus sentinel `ANTHROPIC_API_KEY` and `ANTHROPIC_AUTH_TOKEN` values, the no-gateway launch shape (`--model haiku`, no `--gateway`) started as `Haiku 4.5 · Claude Max`.
 Its Bash tool printed `BASE=unset KEY=unset TOKEN=unset`, and the relay recorded zero requests during that run.
-That run used an earlier no-gateway shape that also unset `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY`; the current no-gateway shape unsets only `ANTHROPIC_BASE_URL`, which is the variable that kept that worker off the relay, and leaves the pane's own credentials to Claude Code as they were before the gateway existed.
-This section has not been re-run with the current shape.
+That run used an earlier no-gateway shape that also unset `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_API_KEY`; the current no-gateway shape unsets `ANTHROPIC_BASE_URL` and the four model-role variables, which keeps inherited proxy model names out of subscription calls, and leaves the pane's own credentials to Claude Code as they were before the gateway existed.
+This section has not been re-run with the current shape; the observed `KEY=unset TOKEN=unset` applies only to the earlier shape.
 
 ## Proxy model listing
 

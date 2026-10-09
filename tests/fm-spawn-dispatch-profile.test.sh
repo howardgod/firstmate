@@ -16,8 +16,8 @@ CLAUDE_CONTROL_CHANNEL_FLAG="--append-system-prompt 'You are a task worker launc
 unset LAVISH_AXI_HOST
 # Every claude launch sheds the supervisor's Anthropic endpoint, and a gateway
 # launch also sheds its credentials (bin/fm-claude-gateway-lib.sh).
-CLAUDE_SCRUB_FLAGS="-u ANTHROPIC_BASE_URL"
-CLAUDE_GATEWAY_SCRUB_FLAGS="$CLAUDE_SCRUB_FLAGS -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY"
+CLAUDE_GATEWAY_SCRUB_FLAGS="-u ANTHROPIC_BASE_URL -u ANTHROPIC_AUTH_TOKEN -u ANTHROPIC_API_KEY"
+CLAUDE_SCRUB_FLAGS="-u ANTHROPIC_BASE_URL -u ANTHROPIC_DEFAULT_HAIKU_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL -u CLAUDE_CODE_SUBAGENT_MODEL"
 
 make_spawn_pi_probe() {
   local fakebin=$1 tool=$2
@@ -2104,6 +2104,35 @@ test_claude_gateway_launch_keeps_ampersands_in_the_merged_settings() {
   pass "--gateway cliproxy keeps ampersands in the merged proxy settings intact"
 }
 
+test_agy_gateway_claude_model_requires_explicit_provider() {
+  local rec id out status launch provider
+  id=gateway-agy-z36
+  rec=$(make_spawn_case gateway-agy claude "$id")
+  read_case_record "$rec"
+  write_gateway_settings "$HOME_DIR"
+
+  for provider in '' codex grok; do
+    if [ -n "$provider" ]; then
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --model claude-opus-5-5-high --gateway cliproxy --gateway-provider "$provider")
+    else
+      out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --model claude-opus-5-5-high --gateway cliproxy)
+    fi
+    status=$?
+    assert_gateway_refusal "$id" "$out" "$status" "never go through CLIProxyAPI"
+  done
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --model opus --gateway cliproxy --gateway-provider agy)
+  status=$?
+  assert_gateway_refusal "$id" "$out" "$status" "never go through CLIProxyAPI"
+
+  out=$(run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --model claude-opus-5-5-high --gateway cliproxy --gateway-provider agy)
+  status=$?
+  expect_code 0 "$status" "agy gateway Claude model should launch"$'\n'"$out"
+  assert_grep 'gateway_provider=agy' "$HOME_DIR/state/$id.meta" "the provider must follow the task for relaunch"
+  launch=$(cat "$LAUNCH_LOG")
+  assert_contains "$launch" "ANTHROPIC_DEFAULT_HAIKU_MODEL='claude-opus-5-5-high'" "the agy model must map onto the gateway role"
+  pass "only an explicit agy gateway provider accepts a claude-prefixed model"
+}
+
 test_claude_gateway_refusals_land_before_any_record() {
   local rec id out status
   id=gateway-refuse-z31
@@ -2175,13 +2204,15 @@ test_claude_gateway_refuses_a_secondmate_spawn() {
   pass "--gateway cliproxy refuses a secondmate spawn before any record"
 }
 
-test_no_gateway_claude_launch_sheds_only_the_supervisor_endpoint() {
+test_no_gateway_claude_launch_sheds_the_supervisor_endpoint_and_model_roles() {
   local rec id out status launch expected doorbell quoted
   id=gateway-off-z34
   rec=$(make_spawn_case gateway-off claude "$id")
   read_case_record "$rec"
 
   out=$(ANTHROPIC_BASE_URL=http://supervisor-proxy.invalid ANTHROPIC_API_KEY="$GATEWAY_KEY_SENTINEL" ANTHROPIC_AUTH_TOKEN="$GATEWAY_KEY_SENTINEL" \
+    ANTHROPIC_DEFAULT_HAIKU_MODEL=gpt-supervisor ANTHROPIC_DEFAULT_SONNET_MODEL=gpt-supervisor \
+    ANTHROPIC_DEFAULT_OPUS_MODEL=gpt-supervisor CLAUDE_CODE_SUBAGENT_MODEL=gpt-supervisor \
     run_ship_spawn "$HOME_DIR" "$WT_DIR" "$FAKEBIN_DIR" "$LAUNCH_LOG" "$id" "$PROJ_DIR" --harness claude --model sonnet)
   status=$?
   expect_code 0 "$status" "claude spawn without a gateway should succeed"$'\n'"$out"
@@ -2193,10 +2224,10 @@ test_no_gateway_claude_launch_sheds_only_the_supervisor_endpoint() {
     || fail "the no-gateway launch did not end with a launch-brief doorbell: $doorbell"
   quoted="'$(printf '%s' "$doorbell" | sed "s/'/'\\\\''/g")'"
   expected="export COMPACT_ADVISER_DISABLE=1; $(task_inbox_export "$HOME_DIR" "$id")$(ai_trailer_hooks_prefix "$HOME_DIR" "$id")env -u CURSOR_AGENT -u CURSOR_INVOKED_AS -u GEMINI_CLI $CLAUDE_SCRUB_FLAGS CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false CLAUDE_CODE_SEND_FEEDBACK=0 claude --dangerously-skip-permissions $(claude_worker_add_dirs "$HOME_DIR" "$id")--settings '{\"feedbackDrafts\":\"off\",\"attribution\":{\"commit\":\"\",\"pr\":\"\",\"sessionUrl\":false}}' $CLAUDE_CONTROL_CHANNEL_FLAG --model 'sonnet' $quoted"
-  [ "$launch" = "$expected" ] || fail "no-gateway claude launch must unset only the supervisor's endpoint and map no model role"$'\n'"expected: $expected"$'\n'"actual:   $launch"
+  [ "$launch" = "$expected" ] || fail "no-gateway claude launch must unset the supervisor's endpoint and model roles"$'\n'"expected: $expected"$'\n'"actual:   $launch"
   assert_not_contains "$launch" "$GATEWAY_KEY_SENTINEL" "no supervisor credential may reach the launch"
   assert_not_contains "$launch" "supervisor-proxy.invalid" "the supervisor's base URL must not reach the launch"
-  pass "a claude launch without a gateway unsets ANTHROPIC_BASE_URL, leaves the pane's credentials alone, and maps no model role"
+  pass "a claude launch without a gateway unsets ANTHROPIC_BASE_URL and all model roles, and leaves the pane's credentials alone"
 }
 
 # config/claude-permission-mode (bin/fm-spawn.sh header): absent and `bypass`
@@ -2447,10 +2478,11 @@ test_keep_ai_trailers_reaches_secondmate_crew_launches
 test_claude_secondmate_launch_carries_the_attribution_policy
 test_active_dispatch_profile_does_not_block_secondmate_launch
 test_claude_gateway_launch_merges_proxy_settings_and_maps_model_roles
+test_agy_gateway_claude_model_requires_explicit_provider
 test_claude_gateway_refusals_land_before_any_record
 test_claude_gateway_refuses_an_unusable_settings_file
 test_claude_gateway_refuses_a_secondmate_spawn
-test_no_gateway_claude_launch_sheds_only_the_supervisor_endpoint
+test_no_gateway_claude_launch_sheds_the_supervisor_endpoint_and_model_roles
 test_claude_gateway_launch_keeps_ampersands_in_the_merged_settings
 
 echo "# all fm-spawn-dispatch-profile tests passed"

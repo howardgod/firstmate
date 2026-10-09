@@ -95,7 +95,7 @@ Grok prepaid `credits` are unrelated to paid-window headroom; never read them as
 
 A candidate carrying `gateway: cliproxy` is Claude Code launched through the local CLIProxyAPI on the vendor its required `provider` names ([`docs/configuration.md`](../../../docs/configuration.md#claude-gateway-cliproxyapi)).
 Establish its model from the proxy's own listing rather than Claude's catalog, match its quota rows and credential surface by that declared provider, and never read Claude's rows or the claude.ai login as evidence for or against it; a gateway candidate is what keeps a Claude Code route available when the Anthropic rows are exhausted.
-Pass the chosen profile to `fm-spawn.sh` with `--gateway cliproxy`, exactly as the typed resolver's `profile:` line does.
+Pass the chosen profile to `fm-spawn.sh` with `--gateway cliproxy --gateway-provider <provider>`, exactly as the typed resolver's `profile:` line does.
 
 Malformed configuration is an actionable error, not a candidate to rank around.
 

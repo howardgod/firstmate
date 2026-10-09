@@ -1153,7 +1153,7 @@ crew_dispatch_validate() {
     elif ([configured_profiles[] | select(has("gateway") and .gateway != "cliproxy")] | length) > 0 then
       "unknown gateway: " + ([configured_profiles[] | select(has("gateway") and .gateway != "cliproxy") | .gateway | tostring] | unique | join(", "))
     elif any(configured_profiles[]; has("gateway") and .harness != "claude") then "gateway cliproxy applies only to harness claude"
-    elif any(configured_profiles[]; has("gateway") and (((.model | type) != "string") or (.model | test($anthropic_model_re; "i")))) then "gateway cliproxy profile needs a model that is not an Anthropic model (a claude prefix or one of Claude Code'\''s own aliases): Anthropic models never go through the proxy"
+    elif any(configured_profiles[]; has("gateway") and (((.model | type) != "string") or ((.model | test($anthropic_model_re; "i")) and ((.provider == "agy" and (.model | test("^claude-"; "i"))) | not)))) then "gateway cliproxy profile needs a model that is not an Anthropic model (a claude prefix or one of Claude Code'\''s own aliases): Anthropic models never go through the proxy"
     elif any(configured_profiles[]; has("gateway") and ((provider_id(.provider) | not) or .provider == "claude")) then "gateway cliproxy profile needs a provider naming the proxied vendor, never claude"
     else
       (configured_profiles

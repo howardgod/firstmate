@@ -426,7 +426,27 @@ reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "a gateway profile resolves"
 assert_contains "$out" 'candidate: claude:gpt-6-sol  gateway=cliproxy  provider=codex  scope=all_models  remaining=31%  spendPriority=-0.1649  runway=projected_exhaustion  -> eligible' "a gateway candidate is ranked by its declared provider, never as claude"
-assert_contains "$out" "  profile: --harness 'claude' --model 'gpt-6-sol' --effort 'high' --gateway 'cliproxy'" "the clear profile line carries the gateway flag"
+assert_contains "$out" "  profile: --harness 'claude' --model 'gpt-6-sol' --effort 'high' --gateway 'cliproxy' --gateway-provider 'codex'" "the clear profile line carries the gateway and provider flags"
+
+printf '%s\n' '{"rules":[{"when":"Antigravity Claude proxy work.","use":{"harness":"claude","model":"claude-opus-5-5-high","provider":"agy","gateway":"cliproxy"}}]}' > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "an agy gateway Claude model resolves"
+assert_contains "$out" "  profile: --harness 'claude' --model 'claude-opus-5-5-high' --gateway 'cliproxy' --gateway-provider 'agy'" "the agy provider reaches the spawn command"
+for provider in codex grok ''; do
+  if [ -n "$provider" ]; then
+    printf '%s\n' "{\"default\":{\"harness\":\"claude\",\"model\":\"claude-opus-5-5-high\",\"provider\":\"$provider\",\"gateway\":\"cliproxy\"}}" > "$RULES"
+  else
+    printf '%s\n' '{"default":{"harness":"claude","model":"claude-opus-5-5-high","gateway":"cliproxy"}}' > "$RULES"
+  fi
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 2 "$code" "gateway Claude model without agy provider refuses"
+  assert_contains "$err" 'whose model is not an Anthropic model' "the gateway refusal names its model rule"
+done
+printf '%s\n' '{"default":{"harness":"claude","model":"opus","provider":"agy","gateway":"cliproxy"}}' > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "agy gateway bare aliases refuse"
+assert_contains "$err" 'whose model is not an Anthropic model' "the alias refusal names its model rule"
 
 cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
 cat > "$RESPONSE" <<'JSON'

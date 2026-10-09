@@ -56,7 +56,7 @@
 #     fallback: <runner-up rule taken when the picked rule missed its own floor>
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
-#     profile: --harness <h> [--model <m>] [--effort <e>] [--gateway cliproxy]     (status clear only)
+#     profile: --harness <h> [--model <m>] [--effort <e>] [--gateway cliproxy --gateway-provider <p>]     (status clear only)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
@@ -183,7 +183,7 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
     ($p | has("gateway")) and (
       $p.gateway != "cliproxy"
       or $p.harness != "claude"
-      or (($p.model | type) != "string") or ($p.model | test($anthropic_model_re; "i"))
+      or (($p.model | type) != "string") or (($p.model | test($anthropic_model_re; "i")) and (($p.provider == "agy" and ($p.model | test("^claude-"; "i"))) | not))
       or (provider_id($p.provider) | not) or $p.provider == "claude");
   def duplicate_profiles($items):
     ($items | map([.harness, (.model // null), (.effort // null)] | @json)) as $keys
@@ -531,6 +531,6 @@ TEXT=$(jq -r '
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end)
-      + (if .chosen.profile.gateway then " --gateway \(.chosen.profile.gateway | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
+      + (if .chosen.profile.gateway then " --gateway \(.chosen.profile.gateway | shell_arg) --gateway-provider \(.chosen.profile.provider | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 printf '%s\n' "$TEXT"
 exit 0
