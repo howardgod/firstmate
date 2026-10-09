@@ -12,8 +12,8 @@ metadata:
 # firstmate-coding-guidelines
 
 Load this before changing firstmate's shared, tracked material, as defined by `AGENTS.md` section 1.
-It exists because `AGENTS.md` grew from 585 to 958 lines between its last two restructures, entirely from conditional detail added inline instead of routed to its right home.
-Applying the rules below on every change is what keeps that from happening again.
+It exists because conditional detail added inline to `AGENTS.md`, instead of routed to its right home, inflates the instruction surface every session loads.
+Applying the rules below on every change keeps that growth in check.
 
 ## Knowledge-placement decision tree
 
@@ -69,8 +69,7 @@ A new skill is dead weight if nothing loads it.
 Every new skill needs its load trigger declared in its description, which is the always-loaded trigger index; add an inline `AGENTS.md` pointer only in the operating section whose always-loaded rule must name it.
 State the trigger as a condition ("load before X", "load on Y wake"), never as a vague pointer.
 Briefs for tasks that touch firstmate's own tracked material should tell the crewmate to load this skill.
-`bin/fm-brief.sh`'s `REPO` argument is a caller-supplied string with no reliable signal that it names firstmate's own repo, unlike a project registered in `data/projects.md`, so there is no clean point inside the scaffold to detect this case automatically.
-Firstmate adds this skill's load instruction to firstmate-repo briefs by hand instead.
+The worker role contract that `bin/fm-spawn.sh` prepends to every ship and scout launch brief (`fm_brief_worker_role` in `bin/fm-dod-lib.sh`) also names this skill, with its file fallback, for Firstmate changes.
 `CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
 
 ## Compatibility and enforcement
@@ -116,7 +115,7 @@ Run `bin/fm-doc-audience-check.sh`; it enforces classification, README setup rou
 
 Never configure a deterministic suite-walk `commands.test` in any repository's no-mistakes config, whether it selects the full suite, changed tests, a family, or a fixed script list.
 Targeted validation belongs to the no-mistakes evidence path, while CI owns broad deterministic regression coverage.
-Firstmate PR #3644 demonstrated the cost: pinning a 75-162-script walk took 32.7 minutes per validation, while removing it restored the 3.6-minute targeted-validation posture.
+The cost is large: a pinned walk of 75-162 scripts took about 33 minutes per validation, against about 4 minutes for targeted validation.
 
 ## Repo style rules
 
