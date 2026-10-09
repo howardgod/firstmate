@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Spawn a direct report: a crewmate in a treehouse or Orca worktree, or a
 # secondmate in its isolated firstmate home.
-# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--gateway cliproxy] [--backend <name>] [--herdr-resume-lock-wait]
-#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--gateway cliproxy] [--backend <name>] [--herdr-resume-lock-wait]
+# Usage: fm-spawn.sh <task-id> <project-dir> --mode <no-mistakes|direct-PR|local-only> --yolo <on|off> [--branch-prefix <prefix>] [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--gateway cliproxy] [--gateway-provider <provider>] [--backend <name>] [--herdr-resume-lock-wait]
+#        fm-spawn.sh <task-id> <project-dir> --scout [--base-branch <branch>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--gateway cliproxy] [--gateway-provider <provider>] [--backend <name>] [--herdr-resume-lock-wait]
 #        fm-spawn.sh <task-id> [<firstmate-home>] [--harness <name>|harness|launch-command] [--model <name>] [--effort <level>] [--backend <name>] --secondmate
 #   --mode and --yolo are this task's delivery contract, REQUIRED for every ship
 #   spawn and refused on --scout and --secondmate spawns. Firstmate resolves both
@@ -52,7 +52,7 @@
 #   first in the private launch-brief overlay, including the exact task-owned
 #   steering inbox. This never rewrites a project's instruction files or a
 #   secondmate's charter.
-#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--gateway cliproxy|none]
+#        fm-spawn.sh <task-id> --relaunch [--harness <name>] [--model <name>] [--effort <level>] [--gateway cliproxy|none] [--gateway-provider <provider>]
 #   --relaunch launches a replacement agent for an EXISTING task into that
 #   task's own recorded worktree, reusing its recorded endpoint when that
 #   endpoint still exists, instead of creating either from scratch. It is
@@ -97,8 +97,8 @@
 #   CLIProxyAPI so another vendor's model runs on the same Claude Code binary.
 #   bin/fm-claude-gateway-lib.sh owns the shared settings file, every refusal
 #   (any other gateway name, a non-claude harness, a raw launch command, a
-#   --secondmate spawn, a missing or Anthropic model (a claude prefix or one of
-#   Claude Code's own aliases, matched case-insensitively by
+#   --secondmate spawn, a missing or Anthropic model (a claude prefix except
+#   when gateway-provider=agy, or one of Claude Code's own aliases, matched by
 #   FM_CLAUDE_GATEWAY_ANTHROPIC_MODEL_RE), an unusable settings file or one
 #   whose env carries ANTHROPIC_API_KEY, ANTHROPIC_AUTH_TOKEN, or
 #   CLAUDE_CODE_OAUTH_TOKEN, absent jq), the --settings merge, and the model-mapping
@@ -109,7 +109,11 @@
 #   launch, gateway or not, sheds the supervisor's ANTHROPIC_BASE_URL, so a
 #   subscription worker never inherits a proxy the supervisor itself was
 #   switched to by hand; a gateway launch also sheds ANTHROPIC_AUTH_TOKEN and
-#   ANTHROPIC_API_KEY so no inherited key outranks the helper. On
+#   ANTHROPIC_API_KEY so no inherited key outranks the helper. A subscription
+#   launch also sheds inherited model-role mappings. A gateway provider is
+#   recorded only when --gateway-provider names it; agy alone may use a
+#   claude-prefixed model supplied by that proxy. A --relaunch keeps the
+#   recorded provider only while the model stays the same. On
 #   --relaunch the recorded gateway is preserved unless --gateway names a new
 #   value (none drops it); a preserved gateway is validated against the
 #   replacement profile exactly like a fresh one, so a new harness or an
@@ -722,6 +726,7 @@ HARNESS_ARG=
 MODEL=
 EFFORT=
 GATEWAY=
+GATEWAY_PROVIDER=
 BACKEND_ARG=
 MODE=
 YOLO=
@@ -731,6 +736,7 @@ HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 GATEWAY_SET=0
+GATEWAY_PROVIDER_SET=0
 BACKEND_SET=0
 MODE_SET=0
 YOLO_SET=0
@@ -768,6 +774,10 @@ for a in "$@"; do
     gateway)
       GATEWAY=$a
       GATEWAY_SET=1
+      ;;
+    gateway-provider)
+      GATEWAY_PROVIDER=$a
+      GATEWAY_PROVIDER_SET=1
       ;;
     backend)
       BACKEND_ARG=$a
@@ -832,6 +842,11 @@ for a in "$@"; do
     GATEWAY=${a#--gateway=}
     GATEWAY_SET=1
     ;;
+  --gateway-provider) want_value="gateway-provider" ;;
+  --gateway-provider=*)
+    GATEWAY_PROVIDER=${a#--gateway-provider=}
+    GATEWAY_PROVIDER_SET=1
+    ;;
   --backend) want_value=backend ;;
   --backend=*)
     BACKEND_ARG=${a#--backend=}
@@ -885,6 +900,10 @@ done
   echo "error: --gateway requires a non-empty value" >&2
   exit 1
 }
+if [ "$GATEWAY_PROVIDER_SET" -eq 1 ] && [[ ! "$GATEWAY_PROVIDER" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+  echo "error: --gateway-provider requires a provider id" >&2
+  exit 1
+fi
 [ "$BACKEND_SET" -eq 0 ] || [ -n "$BACKEND_ARG" ] || {
   echo "error: --backend requires a non-empty value" >&2
   exit 1
@@ -1600,6 +1619,7 @@ if [ "${#POS[@]}" -gt 0 ] && [ "${POS[0]}" != "$idpart" ] && case "$idpart" in *
   [ -z "$MODEL" ] || shared_args+=(--model "$MODEL")
   [ -z "$EFFORT" ] || shared_args+=(--effort "$EFFORT")
   [ -z "$GATEWAY" ] || shared_args+=(--gateway "$GATEWAY")
+  [ -z "$GATEWAY_PROVIDER" ] || shared_args+=(--gateway-provider "$GATEWAY_PROVIDER")
   [ -z "$BACKEND_ARG" ] || shared_args+=(--backend "$BACKEND_ARG")
   # One delivery contract applies to every pair in a batch, exactly like the shared
   # harness. Each pair still re-validates it against its own brief, so a batch
@@ -1920,6 +1940,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # like a fresh one, so a new harness or an Anthropic model refuses rather
   # than silently moving the task between the proxy and the subscription.
   [ "$GATEWAY_SET" -eq 1 ] || GATEWAY=$(fm_meta_get "$RELAUNCH_META" gateway)
+  if [ "$GATEWAY_PROVIDER_SET" -eq 0 ] && [ "${MODEL:-default}" = "$(fm_meta_get "$RELAUNCH_META" model)" ]; then
+    GATEWAY_PROVIDER=$(fm_meta_get "$RELAUNCH_META" gateway_provider)
+  fi
   # A secondmate whose endpoint is gone already has ONE owner for that
   # recovery: the session-start liveness sweep respawns it with
   # `fm-spawn.sh <id> --secondmate`, which stands its home's own workspace back
@@ -2560,6 +2583,13 @@ fi
 # shared CLIProxyAPI settings file over it and maps Claude Code's model roles
 # onto the profile model. Both lists are owned by bin/fm-claude-gateway-lib.sh.
 [ "$GATEWAY" != none ] || GATEWAY=
+if [ -z "$GATEWAY" ]; then
+  [ "$GATEWAY_PROVIDER_SET" -eq 0 ] || {
+    echo "error: --gateway-provider requires --gateway cliproxy" >&2
+    exit 1
+  }
+  GATEWAY_PROVIDER=
+fi
 if [ "$KEEP_AI_TRAILERS" = 1 ]; then
   CLAUDE_WORKER_SETTINGS='{"feedbackDrafts":"off"}'
 else
@@ -2568,7 +2598,7 @@ fi
 CLAUDE_SETTINGS=$CLAUDE_WORKER_SETTINGS
 CLAUDE_GATEWAY_ENV=
 if [ -n "$GATEWAY" ]; then
-  fm_claude_gateway_validate "$GATEWAY" "$HARNESS" "$KIND" "$MODEL" "$RAW_LAUNCH" || exit 1
+  fm_claude_gateway_validate "$GATEWAY" "$HARNESS" "$KIND" "$MODEL" "$RAW_LAUNCH" "$GATEWAY_PROVIDER" || exit 1
   CLAUDE_SETTINGS=$(fm_claude_gateway_settings "$CLAUDE_WORKER_SETTINGS" "$MODEL") || {
     echo "error: --gateway cliproxy could not merge $(fm_claude_gateway_settings_path) into the launch settings" >&2
     exit 1
@@ -5158,7 +5188,7 @@ SPAWN_META_PATH=$SPAWN_META_TMP
 preserve_relaunch_meta() {
   awk -F= '
     BEGIN {
-      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort gateway account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
+      split("window endpoint_task_id worktree project harness kind mode yolo branch tasktmp base_branch model effort gateway gateway_provider account account_provider busy_gen spawn_gen traceparent backend herdr_session herdr_workspace_id herdr_tab_id herdr_pane_id zellij_session zellij_tab_id zellij_pane_id orca_worktree_id terminal cmux_workspace_id cmux_surface_id home projects control_relaunch_tx", keys, " ")
       for (i in keys) owned[keys[i]] = 1
     }
     !($1 in owned)
@@ -5180,6 +5210,7 @@ preserve_relaunch_meta() {
   echo "effort=${EFFORT:-default}"
   # A gateway launch only, so every other record stays byte-identical.
   [ "$GATEWAY" != cliproxy ] || echo "gateway=cliproxy"
+  [ -z "$GATEWAY_PROVIDER" ] || echo "gateway_provider=$GATEWAY_PROVIDER"
   # The worker account pin, only when this home declares one, so an unpinned
   # task record stays byte-identical.
   [ -z "$WORKER_ACCOUNT" ] || echo "account=$WORKER_ACCOUNT_DECLARED"

@@ -916,8 +916,8 @@ test_gateway_none_drops_the_recorded_gateway() {
   expect_code 0 "$rc" "--gateway none with an Anthropic model should succeed"$'\n'"$out"
   [ -z "$(meta_field "$dir" rl41 gateway)" ] || fail "--gateway none must drop the recorded gateway"
   [ "$(meta_field "$dir" rl41 model)" = sonnet ] || fail "the explicit model should be recorded"
-  assert_no_grep "ANTHROPIC_DEFAULT_HAIKU_MODEL" "$dir/fake/literal" "a dropped gateway must map no model role"
-  assert_grep "-u ANTHROPIC_BASE_URL CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" "$dir/fake/literal" "the subscription launch still sheds the supervisor endpoint"
+  assert_no_grep "ANTHROPIC_DEFAULT_HAIKU_MODEL='" "$dir/fake/literal" "a dropped gateway must map no model role"
+  assert_grep "-u ANTHROPIC_BASE_URL -u ANTHROPIC_DEFAULT_HAIKU_MODEL -u ANTHROPIC_DEFAULT_SONNET_MODEL -u ANTHROPIC_DEFAULT_OPUS_MODEL -u CLAUDE_CODE_SUBAGENT_MODEL CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION" "$dir/fake/literal" "the subscription launch sheds the supervisor endpoint and model roles"
   assert_no_grep "ANTHROPIC_API_KEY" "$dir/fake/literal" "the subscription launch must leave the pane's credentials alone"
   pass "fm-control relaunch: --gateway none returns the task to the subscription"
 }
@@ -951,6 +951,43 @@ test_kept_gateway_refuses_an_anthropic_model_before_stop() {
   [ "$(cat "$dir/fake/command")" = claude ] || fail "the running agent must not be stopped by a refused alias relaunch"
   [ "$(meta_field "$dir" rl43 model)" = gpt-6-sol ] || fail "the recorded model must be untouched by the alias refusal"
   pass "fm-control relaunch: a kept gateway refuses an Anthropic model before anything stops"
+}
+
+test_agy_gateway_provider_survives_relaunch_and_alias_refuses() {
+  local dir out rc provider
+  for provider in codex grok; do
+    dir=$(new_case "nongateway-$provider" "rl-$provider")
+    add_gateway_ship_task "$dir" "rl-$provider"
+    printf 'gateway_provider=%s\n' "$provider" >> "$dir/home/state/rl-$provider.meta"
+    out=$(run_control "$dir" "rl-$provider" relaunch --model claude-opus-5-5-high --note "wrong provider"); rc=$?
+    [ "$rc" -ne 0 ] || fail "a $provider gateway must refuse a Claude model"$'\n'"$out"
+    assert_contains "$out" "never go through CLIProxyAPI" "the refusal should name the model rule"
+    [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused $provider model must not stop the old agent"
+  done
+  dir=$(new_case agygateway rl46)
+  add_gateway_ship_task "$dir" rl46
+  sed 's/^model=gpt-6-sol$/model=claude-opus-5-5-high/' "$dir/home/state/rl46.meta" > "$dir/home/state/rl46.meta.tmp"
+  printf 'gateway_provider=agy\n' >> "$dir/home/state/rl46.meta.tmp"
+  mv "$dir/home/state/rl46.meta.tmp" "$dir/home/state/rl46.meta"
+  out=$(run_control "$dir" rl46 relaunch --model opus --gateway-provider agy --note "alias refused"); rc=$?
+  [ "$rc" -ne 0 ] || fail "an agy gateway must still refuse a bare alias"$'\n'"$out"
+  assert_contains "$out" "never go through CLIProxyAPI" "the alias refusal should say why"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused alias must not stop the old agent"
+  out=$(run_control "$dir" rl46 relaunch --model claude-sonnet-5-5-high --note "provider not restated"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a model change without --gateway-provider must not inherit agy"$'\n'"$out"
+  assert_contains "$out" "only with --gateway-provider agy" "the refusal should name the agy exception"
+  [ "$(cat "$dir/fake/command")" = claude ] || fail "a refused model change must not stop the old agent"
+  out=$(run_control "$dir" rl46 relaunch --note "same agy model"); rc=$?
+  expect_code 0 "$rc" "an unchanged agy model should keep its recorded provider"$'\n'"$out"
+  [ "$(meta_field "$dir" rl46 gateway_provider)" = agy ] || fail "the gateway provider should carry across a same-model relaunch"
+  assert_grep "ANTHROPIC_DEFAULT_OPUS_MODEL='claude-opus-5-5-high'" "$dir/fake/literal" "the replacement launch should map the agy model"
+  out=$(run_control "$dir" rl46 relaunch --model gpt-6-sol --note "vendor switch"); rc=$?
+  expect_code 0 "$rc" "a gateway relaunch onto a non-Anthropic model should succeed"$'\n'"$out"
+  [ -z "$(meta_field "$dir" rl46 gateway_provider)" ] || fail "a model change without --gateway-provider must drop the recorded provider"
+  out=$(run_control "$dir" rl46 relaunch --model claude-sonnet-5-5-high --note "stale provider"); rc=$?
+  [ "$rc" -ne 0 ] || fail "a dropped provider must not let a later Claude model through"$'\n'"$out"
+  assert_contains "$out" "never go through CLIProxyAPI" "the refusal should name the model rule"
+  pass "fm-control relaunch: agy is kept only for the same model, must be restated on a model change, and never admits bare aliases"
 }
 
 test_gateway_relaunch_refuses_a_missing_settings_file_before_stop() {
@@ -2622,6 +2659,7 @@ test_pi_exclude_tools_follow_the_relaunch
 test_exclude_tools_refusals_happen_before_the_agent_stops
 test_explicit_model_wins_over_the_recorded_one
 test_same_harness_relaunch_keeps_the_gateway
+test_agy_gateway_provider_survives_relaunch_and_alias_refuses
 test_gateway_none_drops_the_recorded_gateway
 test_harness_switch_drops_the_gateway
 test_kept_gateway_refuses_an_anthropic_model_before_stop

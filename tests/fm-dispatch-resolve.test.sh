@@ -426,7 +426,27 @@ reset_log
 TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
 assert_contains "$out" '  status: clear' "a gateway profile resolves"
 assert_contains "$out" 'candidate: claude:gpt-6-sol  gateway=cliproxy  provider=codex  scope=all_models  remaining=31%  spendPriority=-0.1649  runway=projected_exhaustion  -> eligible' "a gateway candidate is ranked by its declared provider, never as claude"
-assert_contains "$out" "  profile: --harness 'claude' --model 'gpt-6-sol' --effort 'high' --gateway 'cliproxy'" "the clear profile line carries the gateway flag"
+assert_contains "$out" "  profile: --harness 'claude' --model 'gpt-6-sol' --effort 'high' --gateway 'cliproxy' --gateway-provider 'codex'" "the clear profile line carries the gateway and provider flags"
+
+printf '%s\n' '{"rules":[{"when":"Antigravity Claude proxy work.","use":{"harness":"claude","model":"claude-opus-5-5-high","provider":"agy","gateway":"cliproxy"}}]}' > "$RULES"
+reset_log
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+assert_contains "$out" '  status: clear' "an agy gateway Claude model resolves"
+assert_contains "$out" "  profile: --harness 'claude' --model 'claude-opus-5-5-high' --gateway 'cliproxy' --gateway-provider 'agy'" "the agy provider reaches the spawn command"
+for provider in codex grok ''; do
+  if [ -n "$provider" ]; then
+    printf '%s\n' "{\"default\":{\"harness\":\"claude\",\"model\":\"claude-opus-5-5-high\",\"provider\":\"$provider\",\"gateway\":\"cliproxy\"}}" > "$RULES"
+  else
+    printf '%s\n' '{"default":{"harness":"claude","model":"claude-opus-5-5-high","gateway":"cliproxy"}}' > "$RULES"
+  fi
+  TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+  expect_code 2 "$code" "gateway Claude model without agy provider refuses"
+  assert_contains "$err" 'whose model is not an Anthropic model' "the gateway refusal names its model rule"
+done
+printf '%s\n' '{"default":{"harness":"claude","model":"opus","provider":"agy","gateway":"cliproxy"}}' > "$RULES"
+TYPESAFE_API_KEY=$KEY run code out err "$BRIEF"
+expect_code 2 "$code" "agy gateway bare aliases refuse"
+assert_contains "$err" 'whose model is not an Anthropic model' "the alias refusal names its model rule"
 
 cp "$ROOT/docs/examples/crew-dispatch.json" "$RULES"
 cat > "$RESPONSE" <<'JSON'
@@ -990,10 +1010,10 @@ for bad in \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":" claude"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":{"harness":"claude","provider":"claude\n"}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
   '{"rules":[{"when":"x","use":{"harness":"codex","floor":{"scope":"all_models","min_percent":20,"provider":"claude"}}}]}|each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\z when present' \
-  '{"rules":[{"when":"x","use":{"harness":"claude","model":"gpt-6-sol","gateway":"cliproxy"}}]}|each use profile gateway must be cliproxy on a claude profile whose model is not an Anthropic model (a claude prefix or one of Claude Code'\''s own aliases) and whose provider names the proxied vendor, never claude' \
-  '{"rules":[{"when":"x","use":{"harness":"claude","model":"claude-sonnet-5","provider":"codex","gateway":"cliproxy"}}]}|each use profile gateway must be cliproxy on a claude profile whose model is not an Anthropic model (a claude prefix or one of Claude Code'\''s own aliases) and whose provider names the proxied vendor, never claude' \
-  '{"rules":[{"when":"x","use":{"harness":"claude","model":"haiku","provider":"codex","gateway":"cliproxy"}}]}|each use profile gateway must be cliproxy on a claude profile whose model is not an Anthropic model (a claude prefix or one of Claude Code'\''s own aliases) and whose provider names the proxied vendor, never claude' \
-  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"codex","model":"gpt-6-sol","provider":"codex","gateway":"cliproxy"}}|each default profile gateway must be cliproxy on a claude profile whose model is not an Anthropic model (a claude prefix or one of Claude Code'\''s own aliases) and whose provider names the proxied vendor, never claude' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","model":"gpt-6-sol","gateway":"cliproxy"}}]}|each use profile gateway must be cliproxy on a claude profile whose model is not an Anthropic model (a claude- model only with provider agy, never one of Claude Code'\''s own aliases) and whose provider names the proxied vendor, never claude' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","model":"claude-sonnet-5","provider":"codex","gateway":"cliproxy"}}]}|each use profile gateway must be cliproxy on a claude profile whose model is not an Anthropic model (a claude- model only with provider agy, never one of Claude Code'\''s own aliases) and whose provider names the proxied vendor, never claude' \
+  '{"rules":[{"when":"x","use":{"harness":"claude","model":"haiku","provider":"codex","gateway":"cliproxy"}}]}|each use profile gateway must be cliproxy on a claude profile whose model is not an Anthropic model (a claude- model only with provider agy, never one of Claude Code'\''s own aliases) and whose provider names the proxied vendor, never claude' \
+  '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":{"harness":"codex","model":"gpt-6-sol","provider":"codex","gateway":"cliproxy"}}|each default profile gateway must be cliproxy on a claude profile whose model is not an Anthropic model (a claude- model only with provider agy, never one of Claude Code'\''s own aliases) and whose provider names the proxied vendor, never claude' \
   '{"rules":[{"when":"x","use":[{"harness":"codex","model":"gpt-5.5","effort":"high"},{"harness":"codex","model":"gpt-5.5","effort":"high"}]}]}|each rule use must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"codex"}}],"default":[{"harness":"claude","model":"opus"},{"harness":"claude","model":"opus"}]}|default must not contain duplicate harness, model, and effort profiles' \
   '{"rules":[{"when":"x","use":{"harness":"spaceship"}}]}|each use profile must name a verified harness' \

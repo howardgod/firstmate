@@ -20,7 +20,7 @@ Busy hooks verified 2026-07-28 on Claude Code 2.1.220.
 A gateway profile is still `harness=claude` for control and recovery, and the record's `gateway=cliproxy` line is what tells a relaunch to keep the proxy; never infer the gateway from the model name.
 The launch is the ordinary claude shape with the shared `~/.claude/cliproxy-settings.json` merged into its one `--settings` value and every Claude Code model role mapped onto the profile model, so `--model` and `--effort` keep their verified flags.
 Discover the model from the proxy's own listing (`GET /v1/models` on the base URL with the helper key, which returns OpenAI-shaped `data[].id` and `owned_by` naming the vendor), never from Claude's `/model` picker, which does not know proxied models; the listing carries no context-window field.
-An Anthropic model is refused on this path by design, so a profile that wants Claude's own models omits the field.
+An Anthropic model is refused on this path by design, except the `claude-` models a provider-`agy` profile takes from Antigravity, so a profile that wants Claude's own subscription omits the field.
 The busy hooks, `/exit`, Escape, and the trust dialogs below are unchanged, and the `claude.ai connectors are disabled` banner on a gateway worker is expected rather than a sign-in problem.
 `../../../../../docs/verification/claude-gateway.md` records, per installed version, which model names the proxy saw from a gateway worker's foreground turn, background calls, and subagent, and how `--effort` arrived.
 

@@ -7,6 +7,7 @@
 #        fm-control.sh <task-id> relaunch [--harness <name>] [--model <name>]
 #                                         [--effort <level>]
 #                                         [--gateway <cliproxy|none>]
+#                                         [--gateway-provider <provider>]
 #                                         (--note <text> | --note-file <path>)
 #
 # Why this exists, and how it differs from fm-send.sh. bin/fm-send.sh is the
@@ -252,10 +253,12 @@ NEW_HARNESS=
 NEW_MODEL=
 NEW_EFFORT=
 NEW_GATEWAY=
+NEW_GATEWAY_PROVIDER=
 HARNESS_SET=0
 MODEL_SET=0
 EFFORT_SET=0
 GATEWAY_SET=0
+GATEWAY_PROVIDER_SET=0
 NOTE=
 NOTE_SET=0
 control_want_value=
@@ -269,6 +272,7 @@ for control_arg in "$@"; do
       model) NEW_MODEL=$control_arg; MODEL_SET=1 ;;
       effort) NEW_EFFORT=$control_arg; EFFORT_SET=1 ;;
       gateway) NEW_GATEWAY=$control_arg; GATEWAY_SET=1 ;;
+      gateway-provider) NEW_GATEWAY_PROVIDER=$control_arg; GATEWAY_PROVIDER_SET=1 ;;
       note) NOTE=$control_arg; NOTE_SET=1 ;;
       note_file)
         [ -f "$control_arg" ] || die "--note-file '$control_arg' is not a readable file"
@@ -288,6 +292,8 @@ for control_arg in "$@"; do
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
     --gateway) control_want_value=gateway ;;
     --gateway=*) NEW_GATEWAY=${control_arg#--gateway=}; GATEWAY_SET=1 ;;
+    --gateway-provider) control_want_value="gateway-provider" ;;
+    --gateway-provider=*) NEW_GATEWAY_PROVIDER=${control_arg#--gateway-provider=}; GATEWAY_PROVIDER_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
     --note-file) control_want_value=note_file ;;
@@ -305,13 +311,16 @@ if [ -n "$control_want_value" ]; then
 fi
 
 if [ "$VERB" != relaunch ]; then
-  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$GATEWAY_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
-    || die "--harness, --model, --effort, --gateway, and --note apply to 'relaunch' only"
+  [ "$HARNESS_SET" = 0 ] && [ "$MODEL_SET" = 0 ] && [ "$EFFORT_SET" = 0 ] && [ "$GATEWAY_SET" = 0 ] && [ "$GATEWAY_PROVIDER_SET" = 0 ] && [ "$NOTE_SET" = 0 ] \
+    || die "--harness, --model, --effort, --gateway, --gateway-provider, and --note apply to 'relaunch' only"
 fi
 [ "$HARNESS_SET" = 0 ] || [ -n "$NEW_HARNESS" ] || die "--harness requires a non-empty value"
 [ "$MODEL_SET" = 0 ] || [ -n "$NEW_MODEL" ] || die "--model requires a non-empty value"
 [ "$EFFORT_SET" = 0 ] || [ -n "$NEW_EFFORT" ] || die "--effort requires a non-empty value"
 [ "$GATEWAY_SET" = 0 ] || [ -n "$NEW_GATEWAY" ] || die "--gateway requires a non-empty value"
+if [ "$GATEWAY_PROVIDER_SET" = 1 ] && [[ ! "$NEW_GATEWAY_PROVIDER" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+  die "--gateway-provider requires a provider id"
+fi
 case "$NEW_EFFORT" in
   ''|default|low|medium|high|xhigh|max|ultra) ;;
   *) die "--effort must be one of default, low, medium, high, xhigh, max, ultra" ;;
@@ -904,6 +913,7 @@ resolve_relaunch_profile() {
   PRIOR_MODEL=$(fm_meta_get "$META" model)
   PRIOR_EFFORT=$(fm_meta_get "$META" effort)
   PRIOR_GATEWAY=$(fm_meta_get "$META" gateway)
+  PRIOR_GATEWAY_PROVIDER=$(fm_meta_get "$META" gateway_provider)
   [ -n "$PRIOR_MODEL" ] || PRIOR_MODEL=default
   [ -n "$PRIOR_EFFORT" ] || PRIOR_EFFORT=default
   if [ "$HARNESS_SET" = 0 ] \
@@ -988,8 +998,17 @@ resolve_relaunch_profile() {
     TARGET_GATEWAY=none
   fi
   [ "$TARGET_GATEWAY" != none ] || TARGET_GATEWAY=
+  TARGET_GATEWAY_PROVIDER=
   if [ -n "$TARGET_GATEWAY" ]; then
-    fm_claude_gateway_validate "$TARGET_GATEWAY" "$TARGET_HARNESS" "$KIND" "$account_model" 0 || return 1
+    if [ "$GATEWAY_PROVIDER_SET" = 1 ]; then
+      TARGET_GATEWAY_PROVIDER=$NEW_GATEWAY_PROVIDER
+    elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ] && [ "$TARGET_GATEWAY" = "$PRIOR_GATEWAY" ] \
+        && [ "$TARGET_MODEL" = "$PRIOR_MODEL" ]; then
+      TARGET_GATEWAY_PROVIDER=$PRIOR_GATEWAY_PROVIDER
+    fi
+    fm_claude_gateway_validate "$TARGET_GATEWAY" "$TARGET_HARNESS" "$KIND" "$account_model" 0 "$TARGET_GATEWAY_PROVIDER" || return 1
+  elif [ "$GATEWAY_PROVIDER_SET" = 1 ]; then
+    die "--gateway-provider requires --gateway cliproxy"
   fi
   # The launch owner applies this home's worker account pin too, but only after
   # the old agent has been stopped, so a pin that no longer resolves or is
@@ -1156,6 +1175,7 @@ do_relaunch() {
   # passed only when this resolution keeps or drops one.
   if [ -n "$TARGET_GATEWAY" ]; then
     spawn_args+=(--gateway "$TARGET_GATEWAY")
+    [ -z "$TARGET_GATEWAY_PROVIDER" ] || spawn_args+=(--gateway-provider "$TARGET_GATEWAY_PROVIDER")
   elif [ -n "$PRIOR_GATEWAY" ]; then
     spawn_args+=(--gateway none)
   fi

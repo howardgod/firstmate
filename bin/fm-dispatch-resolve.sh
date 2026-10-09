@@ -56,7 +56,7 @@
 #     fallback: <runner-up rule taken when the picked rule missed its own floor>
 #     reason: <why the status is not clear>
 #     candidate: <harness>:<model> provider=.. scope=.. remaining=..% spendPriority=.. runway=.. -> eligible | eligible, unranked: <reason> | not eligible: <reason>
-#     profile: --harness <h> [--model <m>] [--effort <e>] [--gateway cliproxy]     (status clear only)
+#     profile: --harness <h> [--model <m>] [--effort <e>] [--gateway cliproxy --gateway-provider <p>]     (status clear only)
 #   clear     -> pass the profile line to fm-spawn.sh unless you state a reason to override
 #   ambiguous -> confidence below the floor; decide as today from the probabilities
 #   escalate  -> the rule requires captain approval, no candidate is rankable, or a genuine tie
@@ -183,7 +183,7 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
     ($p | has("gateway")) and (
       $p.gateway != "cliproxy"
       or $p.harness != "claude"
-      or (($p.model | type) != "string") or ($p.model | test($anthropic_model_re; "i"))
+      or (($p.model | type) != "string") or (($p.model | test($anthropic_model_re; "i")) and (($p.provider == "agy" and ($p.model | test("^claude-"; "i"))) | not))
       or (provider_id($p.provider) | not) or $p.provider == "claude");
   def duplicate_profiles($items):
     ($items | map([.harness, (.model // null), (.effort // null)] | @json)) as $keys
@@ -200,13 +200,13 @@ rules_err=$(jq -r --argjson verified_harnesses "$VERIFIED_HARNESSES" --arg provi
     "unknown select: " + ([.rules[] | select(has("select") and .select != "quota-balanced") | .select] | unique | join(", "))
   elif any((.rules // [])[]; has("floor") and floor_bad(.floor; true)) then "rule floor needs scope, min_percent 0..100, and provider matching ^[a-z0-9]+(-[a-z0-9]+)*\\z"
   elif any((.rules // [])[] | profiles(.use)[]; profile_bad(.)) then "each use profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
-  elif any((.rules // [])[] | profiles(.use)[]; gateway_bad(.)) then "each use profile gateway must be cliproxy on a claude profile whose model is not an Anthropic model (a claude prefix or one of Claude Code'\''s own aliases) and whose provider names the proxied vendor, never claude"
+  elif any((.rules // [])[] | profiles(.use)[]; gateway_bad(.)) then "each use profile gateway must be cliproxy on a claude profile whose model is not an Anthropic model (a claude- model only with provider agy, never one of Claude Code'\''s own aliases) and whose provider names the proxied vendor, never claude"
   elif any((.rules // [])[]; duplicate_profiles(profiles(.use))) then "each rule use must not contain duplicate harness, model, and effort profiles"
   elif any((.rules // [])[] | profiles(.use)[]; (verified(.harness) | not)) then "each use profile must name a verified harness"
   elif any((.rules // [])[] | profiles(.use)[]; (effort_ok(.harness; .model; .effort) | not)) then "each use profile effort must be supported by its harness and model"
   elif has("default") and (profiles(.default) | length) == 0 then "default must be a profile object or non-empty profile array"
   elif has("default") and any(profiles(.default)[]; profile_bad(.)) then "each default profile needs harness; model, effort, and floor must be well formed, and provider must match ^[a-z0-9]+(-[a-z0-9]+)*\\z when present"
-  elif has("default") and any(profiles(.default)[]; gateway_bad(.)) then "each default profile gateway must be cliproxy on a claude profile whose model is not an Anthropic model (a claude prefix or one of Claude Code'\''s own aliases) and whose provider names the proxied vendor, never claude"
+  elif has("default") and any(profiles(.default)[]; gateway_bad(.)) then "each default profile gateway must be cliproxy on a claude profile whose model is not an Anthropic model (a claude- model only with provider agy, never one of Claude Code'\''s own aliases) and whose provider names the proxied vendor, never claude"
   elif has("default") and duplicate_profiles(profiles(.default)) then "default must not contain duplicate harness, model, and effort profiles"
   elif has("default") and any(profiles(.default)[]; (verified(.harness) | not)) then "each default profile must name a verified harness"
   elif has("default") and any(profiles(.default)[]; (effort_ok(.harness; .model; .effort) | not)) then "each default profile effort must be supported by its harness and model"
@@ -531,6 +531,6 @@ TEXT=$(jq -r '
   (if .chosen then "  profile: --harness \(.chosen.profile.harness | shell_arg)"
       + (if .chosen.profile.model then " --model \(.chosen.profile.model | shell_arg)" else "" end)
       + (if .chosen.profile.effort then " --effort \(.chosen.profile.effort | shell_arg)" else "" end)
-      + (if .chosen.profile.gateway then " --gateway \(.chosen.profile.gateway | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
+      + (if .chosen.profile.gateway then " --gateway \(.chosen.profile.gateway | shell_arg) --gateway-provider \(.chosen.profile.provider | shell_arg)" else "" end) else empty end)' <<<"$RESULT") || emit_error "output rendering failed"
 printf '%s\n' "$TEXT"
 exit 0

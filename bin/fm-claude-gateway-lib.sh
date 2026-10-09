@@ -17,7 +17,8 @@
 # ANTHROPIC_AUTH_TOKEN and ANTHROPIC_API_KEY so no inherited key outranks the
 # helper, and a gateway launch re-establishes the base URL and key helper only
 # through the shared settings file, so a key rotation or URL change edits one
-# file. A launch without a gateway leaves the pane's own credentials alone.
+# file. A launch without a gateway clears inherited model-role mappings and
+# leaves the pane's own credentials alone.
 #
 # Settings file: $HOME/.claude/cliproxy-settings.json, a Claude Code settings
 # document whose `env.ANTHROPIC_BASE_URL` names the proxy and whose
@@ -35,10 +36,12 @@
 #     config/secondmate-harness, which carries no gateway token
 #   - no model, or an Anthropic model (a claude prefix or one of Claude Code's
 #     own aliases, matched case-insensitively by
-#     FM_CLAUDE_GATEWAY_ANTHROPIC_MODEL_RE): an Anthropic model never goes
-#     through the proxy (Anthropic ToS), and Claude Code's default model is an
-#     Anthropic model; bin/fm-bootstrap.sh and bin/fm-dispatch-resolve.sh test
-#     profiles against the same pattern
+#     FM_CLAUDE_GATEWAY_ANTHROPIC_MODEL_RE): the Anthropic subscription never
+#     goes through the proxy (Anthropic ToS), and Claude Code's default model
+#     is an Anthropic model. The one exception is a claude- model with
+#     provider agy, which Antigravity serves through the proxy; a bare alias
+#     stays refused for every provider. bin/fm-bootstrap.sh and
+#     bin/fm-dispatch-resolve.sh test profiles against the same rule
 #   - a missing, unreadable, non-JSON settings file, or one lacking a
 #     non-empty env.ANTHROPIC_BASE_URL string or apiKeyHelper string
 #   - a settings file whose env carries ANTHROPIC_API_KEY,
@@ -84,21 +87,25 @@ fm_claude_gateway_settings_path() {
 
 # fm_claude_gateway_scrub_flags <gateway>
 # Prints the `env` -u flags a Claude launch carries: the endpoint above on
-# every launch, plus the credentials above when <gateway> is non-empty.
+# every launch, model roles without a gateway, credentials with a gateway.
 fm_claude_gateway_scrub_flags() {
   local var flags='' vars=$FM_CLAUDE_GATEWAY_SCRUB
-  [ -z "$1" ] || vars="$vars $FM_CLAUDE_GATEWAY_CREDENTIAL_SCRUB"
+  if [ -z "$1" ]; then
+    vars="$vars $FM_CLAUDE_GATEWAY_MODEL_ROLES"
+  else
+    vars="$vars $FM_CLAUDE_GATEWAY_CREDENTIAL_SCRUB"
+  fi
   for var in $vars; do
     flags="$flags${flags:+ }-u $var"
   done
   printf '%s\n' "$flags"
 }
 
-# fm_claude_gateway_validate <gateway> <harness> <kind> <model> <raw-launch 0|1>
+# fm_claude_gateway_validate <gateway> <harness> <kind> <model> <raw-launch 0|1> [provider]
 # Returns 0 when a gateway launch may proceed; otherwise prints one error line
 # and returns 1. An empty or `none` gateway always passes.
 fm_claude_gateway_validate() {
-  local gateway=$1 harness=$2 kind=$3 model=$4 raw=$5 settings
+  local gateway=$1 harness=$2 kind=$3 model=$4 raw=$5 provider=${6:-} lower settings
   case "$gateway" in
   '' | none) return 0 ;;
   cliproxy) ;;
@@ -123,8 +130,10 @@ fm_claude_gateway_validate() {
     echo "error: --gateway cliproxy needs an explicit non-Anthropic --model: Claude Code's default model is an Anthropic model, which never goes through the proxy" >&2
     return 1
   fi
-  if [[ "$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')" =~ $FM_CLAUDE_GATEWAY_ANTHROPIC_MODEL_RE ]]; then
-    echo "error: --gateway cliproxy refuses model '$model': Anthropic models stay on Claude Code's own subscription and never go through CLIProxyAPI (Anthropic terms of service)" >&2
+  lower=$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')
+  if [[ "$lower" =~ $FM_CLAUDE_GATEWAY_ANTHROPIC_MODEL_RE ]] \
+      && ! { [ "$provider" = agy ] && [[ "$lower" == claude-* ]]; }; then
+    echo "error: --gateway cliproxy refuses model '$model': Anthropic models stay on Claude Code's own subscription and never go through CLIProxyAPI (Anthropic terms of service); a claude- model is accepted only with --gateway-provider agy, and Claude Code's own aliases are always refused" >&2
     return 1
   fi
   settings=$(fm_claude_gateway_settings_path)
