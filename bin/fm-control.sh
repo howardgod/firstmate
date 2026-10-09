@@ -1002,7 +1002,8 @@ resolve_relaunch_profile() {
   if [ -n "$TARGET_GATEWAY" ]; then
     if [ "$GATEWAY_PROVIDER_SET" = 1 ]; then
       TARGET_GATEWAY_PROVIDER=$NEW_GATEWAY_PROVIDER
-    elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ] && [ "$TARGET_GATEWAY" = "$PRIOR_GATEWAY" ]; then
+    elif [ "$TARGET_HARNESS" = "$PRIOR_HARNESS" ] && [ "$TARGET_GATEWAY" = "$PRIOR_GATEWAY" ] \
+        && [ "$TARGET_MODEL" = "$PRIOR_MODEL" ]; then
       TARGET_GATEWAY_PROVIDER=$PRIOR_GATEWAY_PROVIDER
     fi
     fm_claude_gateway_validate "$TARGET_GATEWAY" "$TARGET_HARNESS" "$KIND" "$account_model" 0 "$TARGET_GATEWAY_PROVIDER" || return 1

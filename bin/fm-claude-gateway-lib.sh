@@ -133,7 +133,7 @@ fm_claude_gateway_validate() {
   lower=$(printf '%s' "$model" | tr '[:upper:]' '[:lower:]')
   if [[ "$lower" =~ $FM_CLAUDE_GATEWAY_ANTHROPIC_MODEL_RE ]] \
       && ! { [ "$provider" = agy ] && [[ "$lower" == claude-* ]]; }; then
-    echo "error: --gateway cliproxy refuses model '$model': Anthropic models stay on Claude Code's own subscription and never go through CLIProxyAPI (Anthropic terms of service)" >&2
+    echo "error: --gateway cliproxy refuses model '$model': Anthropic models stay on Claude Code's own subscription and never go through CLIProxyAPI (Anthropic terms of service); a claude- model is accepted only with --gateway-provider agy, and Claude Code's own aliases are always refused" >&2
     return 1
   fi
   settings=$(fm_claude_gateway_settings_path)

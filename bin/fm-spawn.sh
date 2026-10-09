@@ -112,7 +112,8 @@
 #   ANTHROPIC_API_KEY so no inherited key outranks the helper. A subscription
 #   launch also sheds inherited model-role mappings. A gateway provider is
 #   recorded only when --gateway-provider names it; agy alone may use a
-#   claude-prefixed model supplied by that proxy. On
+#   claude-prefixed model supplied by that proxy. A --relaunch keeps the
+#   recorded provider only while the model stays the same. On
 #   --relaunch the recorded gateway is preserved unless --gateway names a new
 #   value (none drops it); a preserved gateway is validated against the
 #   replacement profile exactly like a fresh one, so a new harness or an
@@ -1939,7 +1940,9 @@ if [ "$RELAUNCH" -eq 1 ]; then
   # like a fresh one, so a new harness or an Anthropic model refuses rather
   # than silently moving the task between the proxy and the subscription.
   [ "$GATEWAY_SET" -eq 1 ] || GATEWAY=$(fm_meta_get "$RELAUNCH_META" gateway)
-  [ "$GATEWAY_PROVIDER_SET" -eq 1 ] || GATEWAY_PROVIDER=$(fm_meta_get "$RELAUNCH_META" gateway_provider)
+  if [ "$GATEWAY_PROVIDER_SET" -eq 0 ] && [ "${MODEL:-default}" = "$(fm_meta_get "$RELAUNCH_META" model)" ]; then
+    GATEWAY_PROVIDER=$(fm_meta_get "$RELAUNCH_META" gateway_provider)
+  fi
   # A secondmate whose endpoint is gone already has ONE owner for that
   # recovery: the session-start liveness sweep respawns it with
   # `fm-spawn.sh <id> --secondmate`, which stands its home's own workspace back
