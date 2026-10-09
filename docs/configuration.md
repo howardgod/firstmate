@@ -1145,7 +1145,7 @@ This section is the single owner of the canonical schema and its per-field seman
       "floor": { "scope": "<quota-axi scope>", "min_percent": 20, "provider": "<quota-axi provider>" },
       "use": [
         { "harness": "<adapter>", "model": "<optional model>", "effort": "<low|medium|high|xhigh|max|ultra, optional>", "provider": "<optional quota-axi provider>", "floor": { "scope": "<quota-axi scope>", "min_percent": 50 } },
-        { "harness": "claude", "model": "<non-Anthropic model the proxy serves>", "effort": "<optional effort>", "provider": "<quota-axi provider of that model's vendor>", "gateway": "cliproxy" }
+        { "harness": "claude", "model": "<model the proxy serves that the gateway model rule accepts>", "effort": "<optional effort>", "provider": "<quota-axi provider of that model's vendor>", "gateway": "cliproxy" }
       ],
       "why": "<optional rationale that helps firstmate choose>"
     }
@@ -1223,7 +1223,7 @@ See [`docs/examples/crew-dispatch.json`](examples/crew-dispatch.json) for a star
 
 - When the file exists, bootstrap validates it with `jq`.
 - Valid files stay silent by default; with `FM_BOOTSTRAP_VERBOSE_FACTS=1`, bootstrap emits `BOOTSTRAP_INFO: crew dispatch active config/crew-dispatch.json`, one `BOOTSTRAP_INFO:` fact per rule, and one fact for the optional default profile set.
-- Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, an effort value unsupported by that harness, or a `gateway` field that is not `cliproxy` on a claude profile with a non-Anthropic model and a non-claude provider is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
+- Malformed JSON, malformed rules, an empty or malformed profile array, an unverified harness, an effort value unsupported by that harness, or a `gateway` field that is not `cliproxy` on a claude profile with a model the [gateway model rule](#claude-gateway-cliproxyapi) accepts and a non-claude provider is reported as `CREW_DISPATCH: invalid config/crew-dispatch.json - ...`.
 - While typed resolution is active, malformed `approval`, `min_confidence`, `floor`, and present `provider` declarations receive the same diagnostic; without the key those inert declarations preserve the pre-existing bootstrap behavior.
 - Missing `jq` is reported through the normal `MISSING: jq` install-consent flow.
 - While the file remains present, no crewmate or scout spawn may proceed without an explicit resolved harness; malformed configuration must be reported and corrected rather than selected around.
