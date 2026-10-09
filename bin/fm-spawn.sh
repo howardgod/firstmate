@@ -842,7 +842,7 @@ for a in "$@"; do
     GATEWAY=${a#--gateway=}
     GATEWAY_SET=1
     ;;
-  --gateway-provider) want_value=gateway-provider ;;
+  --gateway-provider) want_value="gateway-provider" ;;
   --gateway-provider=*)
     GATEWAY_PROVIDER=${a#--gateway-provider=}
     GATEWAY_PROVIDER_SET=1

@@ -292,7 +292,7 @@ for control_arg in "$@"; do
     --effort=*) NEW_EFFORT=${control_arg#--effort=}; EFFORT_SET=1 ;;
     --gateway) control_want_value=gateway ;;
     --gateway=*) NEW_GATEWAY=${control_arg#--gateway=}; GATEWAY_SET=1 ;;
-    --gateway-provider) control_want_value=gateway-provider ;;
+    --gateway-provider) control_want_value="gateway-provider" ;;
     --gateway-provider=*) NEW_GATEWAY_PROVIDER=${control_arg#--gateway-provider=}; GATEWAY_PROVIDER_SET=1 ;;
     --note) control_want_value=note ;;
     --note=*) NOTE=${control_arg#--note=}; NOTE_SET=1 ;;
