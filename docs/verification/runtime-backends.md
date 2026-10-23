@@ -2223,6 +2223,7 @@ $ rex --autostart=false api call server.status | jq .api_revision
 
 The evidence below used scratch sessions labeled `fm-test-*` on the personal Rex server, before private-server isolation; its transcripts are not the current test procedure.
 [`tests/rex-test-safety.sh`](../../tests/rex-test-safety.sh) owns the current isolation contract.
+Whether `session.create` changes the attached app remains unverified; follow the private-server isolation contract above rather than probing the live server.
 
 Current active CLI findings:
 
