@@ -1,9 +1,7 @@
 ---
 name: firstmate-coding-guidelines
 description: >-
-  Agent-only reference for changing firstmate's shared, tracked material per AGENTS.md section 1.
-  Use before editing any of that material, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
-  Covers the knowledge-placement decision tree, the one-owner rule for contracts, the inline-stub pattern for content moved into a skill, AGENTS.md size discipline, trigger hygiene for new skills, and repo style rules (one sentence per line, plain dash, no agent co-author, shellcheck-clean bin scripts, colocated tests, and maintainer-verification evidence).
+  Load before editing firstmate's shared, tracked material as defined by AGENTS.md section 1, whether working as firstmate directly or as a crewmate briefed on a firstmate-repo task.
 user-invocable: false
 metadata:
   internal: true
@@ -69,7 +67,8 @@ A new skill is dead weight if nothing loads it.
 Every new skill needs its load trigger declared in its description, which is the always-loaded trigger index; add an inline `AGENTS.md` pointer only in the operating section whose always-loaded rule must name it.
 State the trigger as a condition ("load before X", "load on Y wake"), never as a vague pointer.
 Briefs for tasks that touch firstmate's own tracked material should tell the crewmate to load this skill.
-The worker role contract that `bin/fm-spawn.sh` prepends to every ship and scout launch brief (`fm_brief_worker_role` in `bin/fm-dod-lib.sh`) also names this skill, with its file fallback, for Firstmate changes.
+`bin/fm-brief.sh`'s `REPO` argument is a caller-supplied string, while its optional `--project` directory enables lineage-based self-repository detection for the publication gate (`bin/fm-role-lib.sh`).
+The scaffold does not add this skill's load instruction; the worker role contract that `bin/fm-spawn.sh` prepends to every ship and scout launch brief (`fm_brief_worker_role` in `bin/fm-dod-lib.sh`) names this skill, with its file fallback, for Firstmate changes.
 `CONTRIBUTING.md`'s "Development" section carries the same instruction as a durable reminder.
 
 ## Compatibility and enforcement
