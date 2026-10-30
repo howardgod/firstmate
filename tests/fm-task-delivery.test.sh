@@ -502,6 +502,21 @@ EOF
   pass "fm-merge-local: a registry change cannot redirect an in-flight local-only task"
 }
 
+test_local_merge_help_prints_usage() {
+  local home flag out
+  home="$TMP_ROOT/local-merge-help/home"
+  mkdir -p "$home/state"
+  for flag in --help -h; do
+    out=$(FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" "$MERGE_LOCAL" "$flag" 2>&1) \
+      || fail "fm-merge-local $flag did not exit 0: $out"
+    assert_contains "$out" "Usage: fm-merge-local.sh <task-id>" \
+      "fm-merge-local $flag did not print its usage"
+    assert_not_contains "$out" "no meta for task" \
+      "fm-merge-local $flag was treated as a task id"
+  done
+  pass "fm-merge-local: --help and -h print usage instead of looking up a task"
+}
+
 # A registered name may contain spaces, and the lookup must match the whole
 # name rather than only its first whitespace-delimited token (issue #1977).
 # The longer "foo bar" row is listed before the "foo" row so a leading-prefix
@@ -1752,6 +1767,7 @@ test_promotion_delivers_the_real_definition_of_done
 test_promotion_persists_the_selected_ship_branch
 test_promotion_branch_command_is_shell_safe
 test_local_merge_uses_the_recorded_ship_branch
+test_local_merge_help_prints_usage
 test_project_mode_matches_whole_multiword_names
 test_project_mode_maps_the_conditional_policy
 test_project_mode_binds_the_forge_orthogonally
