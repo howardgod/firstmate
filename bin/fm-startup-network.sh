@@ -482,7 +482,7 @@ publish_lock_held() {  # <generation> <phases> <locked> <started> <lockdir> <out
 }
 
 cmd_run() {  # <locked> <lock-pid> <generation>
-  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started stage_deadline
+  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started stage_deadline summary_left summary_timeout
   mkdir -p "$STATE" 2>/dev/null || return 1
   started=$(now)
   budget=$(stage_budget)
@@ -571,13 +571,9 @@ EOF
   # One aggregate deadline covers all deferred operations. The inactive scan
   # retains its own tighter per-scan bound inside this outer bound. Findings
   # need no report translation: the scan writes its ordinary durable
-  # inactive-outcome wakes directly. A child shell composes the executable
+  # inactive-outcome wakes directly. A child shell composes the two executable
   # owners only so fm_run_timed can govern them as one process group.
-  # Summary publication runs last so its cost cannot crowd out the sweeps;
-  # ordinary refresh failures stay in its best-effort log, not this report.
-  # Its deadline fits inside what the sweeps leave, with room for its failure
-  # log, so the bootstrap exit status always decides the stage result.
-  # The operations get whatever the lock waits above left of the stage budget.
+  # The sweeps get whatever the lock waits above left of the stage budget.
   budget=$(seconds_until "$stage_deadline")
   if [ "$sweep_locked" -eq 1 ]; then
     # shellcheck disable=SC2016  # Child-shell variables expand inside the bound.
@@ -585,20 +581,9 @@ EOF
       FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_NETWORK_LOCK_PID="$lock_pid" \
       bash -c '
         script_dir=$1
-        stage_deadline=$2
         "$script_dir/fm-inactive-reconcile.sh" scan --startup >/dev/null 2>&1 || true
-        "$script_dir/fm-bootstrap.sh"
-        bootstrap_rc=$?
-        summary_left=$(( stage_deadline - $(date +%s) - 6 ))
-        if [ "$summary_left" -ge 1 ]; then
-          summary_timeout=${FM_HOME_SUMMARY_TIMEOUT:-60}
-          case "$summary_timeout" in ""|*[!0-9]*|0*) summary_timeout=60 ;; esac
-          [ "$summary_timeout" -le "$summary_left" ] || summary_timeout=$summary_left
-          FM_HOME_SUMMARY_TIMEOUT=$summary_timeout \
-            "$script_dir/fm-home-summary-refresh.sh" --best-effort >/dev/null 2>&1 || true
-        fi
-        exit "$bootstrap_rc"
-      ' _ "$SCRIPT_DIR" "$stage_deadline" >"$out" 2>&1 || rc=$?
+        exec "$script_dir/fm-bootstrap.sh"
+      ' _ "$SCRIPT_DIR" >"$out" 2>&1 || rc=$?
   else
     fm_run_timed "$budget" env FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 \
       "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
@@ -607,6 +592,21 @@ EOF
   # The bounded run as a whole, so the per-phase records can be read against the
   # total even when the bound cut some of them off.
   fm_timing_record stage network-checks "$stage_started" "$phases"
+  # Summary publication needs no fleet lease, so it runs after the lease is
+  # released and after the sweeps so its cost cannot crowd them out. Its
+  # deadline fits inside what the sweeps left of the stage budget, with room for
+  # its failure log; ordinary refresh failures stay in its best-effort log, and
+  # the bootstrap exit status alone decides the stage result.
+  if [ "$sweep_locked" -eq 1 ]; then
+    summary_left=$(( stage_deadline - $(now) - 6 ))
+    if [ "$summary_left" -ge 1 ]; then
+      summary_timeout=${FM_HOME_SUMMARY_TIMEOUT:-60}
+      case "$summary_timeout" in ''|*[!0-9]*|0*) summary_timeout=60 ;; esac
+      [ "$summary_timeout" -le "$summary_left" ] || summary_timeout=$summary_left
+      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_HOME_SUMMARY_TIMEOUT="$summary_timeout" \
+        "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort >/dev/null 2>&1 || true
+    fi
+  fi
 
   if [ "$downgraded" -eq 1 ]; then
     printf 'NETWORK_CHECKS: the recorded fleet lock holder changed after these were requested, so dead-secondmate relaunch, secondmate convergence, pending handoff delivery, and project clone refresh were skipped; they belong to whichever session holds the lock now\n' >> "$out"

@@ -1761,7 +1761,7 @@ EOF
 # returned. A timeout still exits zero in best-effort mode, so also assert that
 # returning did not merely wait out the publisher's deadline.
 test_home_summary_refresh_never_blocks_the_digest() {
-  local rec root home fakebin out f release started prior
+  local rec root home fakebin out f release started prior ticks
   rec=$(new_world home-summary-deferred)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1807,6 +1807,26 @@ SH
     || fail "the digest waited for the summary deadline instead of deferring it"
   [ "$(cat "$home/state/home-summary.json")" = "$prior" ] \
     || fail "an outstanding refresh replaced the prior complete ledger"
+
+  # The same session restarting while the producer is still held must not wait
+  # for it: the held producer would otherwise run into its 30s deadline.
+  ticks=0
+  while [ ! -e "$started" ] && [ "$ticks" -lt 300 ]; do
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  assert_present "$started" "the deferred worker never reached the summary producer"
+  out=$(FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_FAKE_SUMMARY_STARTED="$started" FM_FAKE_SUMMARY_RELEASE="$release" \
+    FM_REAL_SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh" \
+    "$root/bin/fm-session-start.sh" --reemit)
+  assert_contains "$out" "lock acquired" "a re-emit during the summary lost lock ownership"
+  assert_contains "$out" "NEXT STEP" "a re-emit during the summary did not complete its digest"
+  [ ! -s "$home/state/.home-summary-refresh.log" ] \
+    || fail "a re-emit waited for the held summary producer"
+  [ "$(cat "$home/state/home-summary.json")" = "$prior" ] \
+    || fail "the summary producer finished before the re-emit returned"
   : > "$release"
   wait_for_network_stage "$home" "$root" 60 \
     || fail "the deferred summary worker never finished"
