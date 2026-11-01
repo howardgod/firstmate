@@ -15,8 +15,10 @@
 # time, or as a durable wake when it does not. The locked startup's bounded
 # inactive-outcome scan and best-effort home-summary refresh also run here because
 # their local current-state reads can be just as slow. The scan publishes its own
-# findings to the durable wake queue; the refresh retains its own atomic ledger
-# publication and failure log (bin/fm-home-summary-refresh.sh).
+# findings to the durable wake queue. The refresh is detached once the sweep
+# result is recorded, so it never delays that result, and it keeps its own
+# deadline, atomic ledger publication, and failure log
+# (bin/fm-home-summary-refresh.sh).
 #
 # WHAT IS PRESERVED. Nothing is dropped. bin/fm-bootstrap.sh remains the single
 # owner of every network sweep and still runs all of them, unchanged, via its
@@ -63,6 +65,7 @@
 #          Run the checks in the foreground and publish the result. This is what
 #          `start` detaches with its private generation reservation; run it
 #          directly to redo the stage by hand from the lock-owning harness.
+#          A direct run does not refresh the home summary.
 #          Exits non-zero when the stage was refused or could not publish,
 #          including a lock a live process still held at its deadline.
 #        fm-startup-network.sh harvest --pid <pid>
@@ -108,7 +111,7 @@
 #                             and the wake decision; every wait on it is bounded.
 #
 # The whole stage is bounded by FM_STARTUP_NETWORK_TIMEOUT (default 120s), one
-# aggregate deadline covering the inactive-outcome scan, network sweeps, and summary refresh
+# aggregate deadline covering both the inactive-outcome scan and network sweeps
 # plus every lock the worker waits on before them.
 # Publication and delivery are bounded the same way by FM_SESSION_START_TIMEOUT.
 # A lock that a live process still holds at either deadline ends the worker with
@@ -129,6 +132,7 @@ CLAIM_FILE="$STATE/.startup-network.claim"
 DELIVERED_FILE="$STATE/.startup-network.delivered"
 TIMINGS_FILE="$STATE/.startup-network.timings"
 PUBLISH_LOCK="$STATE/.startup-network.lock"
+REFRESH_SUMMARY_AFTER_RECORD=0
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
@@ -457,6 +461,10 @@ publish() {  # <generation> <state> <phases> <locked> <started> <rc> <output-fil
   fi
   state=$(record_result "$generation" "$state" "$phases" "$locked" "$started" "$rc" "$out" "$timings")
   fm_lock_release "$PUBLISH_LOCK"
+  if [ "$REFRESH_SUMMARY_AFTER_RECORD" -eq 1 ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
+  fi
   await_delivery "$generation" "$state"
 }
 
@@ -482,7 +490,7 @@ publish_lock_held() {  # <generation> <phases> <locked> <started> <lockdir> <out
 }
 
 cmd_run() {  # <locked> <lock-pid> <generation>
-  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started stage_deadline summary_left summary_timeout
+  local locked=$1 lock_pid=$2 generation=$3 phases started budget out rc sweep_locked=0 downgraded=0 internal=0 lease_held=0 timings stage_started stage_deadline
   mkdir -p "$STATE" 2>/dev/null || return 1
   started=$(now)
   budget=$(stage_budget)
@@ -568,7 +576,10 @@ EOF
       downgraded=1
     fi
   fi
-  # One aggregate deadline covers all deferred operations. The inactive scan
+  # Only the worker a session start launched publishes the home summary, after
+  # its sweep result is recorded; a direct rerun does not.
+  [ "$internal" -eq 0 ] || [ "$sweep_locked" -eq 0 ] || REFRESH_SUMMARY_AFTER_RECORD=1
+  # One aggregate deadline covers both deferred operations. The inactive scan
   # retains its own tighter per-scan bound inside this outer bound. Findings
   # need no report translation: the scan writes its ordinary durable
   # inactive-outcome wakes directly. A child shell composes the two executable
@@ -611,20 +622,6 @@ EOF
   esac
   rc=$?
   run_cleanup "$out" "$timings"
-  # Summary publication needs no fleet lease and is not part of the sweep
-  # result, so it runs only after that result is published and delivered. Its
-  # deadline fits inside what is left of the stage budget, with room for its
-  # failure log; ordinary refresh failures stay in its best-effort log.
-  if [ "$sweep_locked" -eq 1 ]; then
-    summary_left=$(( stage_deadline - $(now) - 6 ))
-    if [ "$summary_left" -ge 1 ]; then
-      summary_timeout=${FM_HOME_SUMMARY_TIMEOUT:-60}
-      case "$summary_timeout" in ''|*[!0-9]*|0*) summary_timeout=60 ;; esac
-      [ "$summary_timeout" -le "$summary_left" ] || summary_timeout=$summary_left
-      FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" FM_HOME_SUMMARY_TIMEOUT="$summary_timeout" \
-        "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort >/dev/null 2>&1 || true
-    fi
-  fi
   return "$rc"
 }
 
