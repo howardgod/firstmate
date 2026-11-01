@@ -172,6 +172,62 @@ SH
   pass "fm-startup-network: a slow summary stays inside the stage budget and keeps the sweep result"
 }
 
+# A held summary producer must not hold back the sweep result: the stage record
+# is published, and harvest prints it as finished, while the producer still runs.
+test_slow_summary_does_not_delay_published_sweep_results() {
+  local rec home root log started release report ticks=0
+  rec=$(new_world summary-after-publish)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  started="${home%/home}/summary.started"
+  release="${home%/home}/summary.release"
+  rm "$root/bin/fm-fleet-snapshot.sh"
+  cat > "$root/bin/fm-fleet-snapshot.sh" <<SH
+#!/usr/bin/env bash
+: > '$started'
+ticks=0
+while [ ! -e '$release' ] && [ "\$ticks" -lt 400 ]; do
+  sleep 0.1
+  ticks=\$((ticks + 1))
+done
+exit 7
+SH
+  chmod +x "$root/bin/fm-fleet-snapshot.sh"
+  printf '%s\n' $$ > "$home/state/.lock"
+  : > "$home/state/.wake-queue"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" FM_FAKE_BOOTSTRAP_OUT='BOOTSTRAP_INFO: sweeps finished' \
+    run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+  run_stage "$home" "$root" harvest --pid $$ >/dev/null
+  while [ ! -e "$started" ] && [ "$ticks" -lt 300 ]; do
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  assert_present "$started" "the locked deferred worker never started the summary producer"
+  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = 'done' ] \
+    || fail "the sweep result was not published before the summary producer ran"
+  report=$(run_stage "$home" "$root" harvest --pid $$)
+  assert_contains "$report" "completed off the startup path" \
+    "harvest reported finished sweeps as pending while the summary ran: $report"
+  assert_contains "$report" "BOOTSTRAP_INFO: sweeps finished" \
+    "harvest did not print the published sweep result while the summary ran: $report"
+  assert_not_contains "$report" "home-summary" "the stage report named the best-effort summary"
+  [ ! -s "$home/state/.home-summary-refresh.log" ] \
+    || fail "the summary producer finished before the sweep result was checked"
+  : > "$release"
+  ticks=0
+  while ! grep -Fq 'summary producer failed with exit 7' "$home/state/.home-summary-refresh.log" 2>/dev/null \
+    && [ "$ticks" -lt 300 ]; do
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  assert_grep 'summary producer failed with exit 7' "$home/state/.home-summary-refresh.log" \
+    "the summary refresh did not log its own best-effort failure after publication"
+  [ ! -s "$home/state/.wake-queue" ] || fail "a best-effort summary failure queued a network wake"
+  pass "fm-startup-network: a slow summary runs after the sweep result is published"
+}
+
 test_wait_fails_without_a_published_stage() {
   local rec home root log
   rec=$(new_world wait-without-stage)
@@ -930,6 +986,7 @@ EOF
 
 test_summary_failure_is_best_effort_and_requires_locked_work
 test_slow_summary_cannot_turn_finished_sweeps_into_a_timeout
+test_slow_summary_does_not_delay_published_sweep_results
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it

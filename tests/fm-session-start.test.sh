@@ -701,6 +701,21 @@ wait_for_network_stage() {
     "$ROOT/bin/fm-startup-network.sh" wait "$limit"
 }
 
+# The summary refresh follows the published stage result, so a test that wants
+# the ledger waits for it rather than for the stage.
+wait_for_home_summary() {  # <home> <tenths> [<prior-ledger>]
+  local home=$1 limit=$2 prior=${3:-} waited=0
+  while [ "$waited" -lt "$limit" ]; do
+    if [ -s "$home/state/home-summary.json" ] \
+      && [ "$(cat "$home/state/home-summary.json")" != "$prior" ]; then
+      return 0
+    fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  return 1
+}
+
 wait_for_network_wake() {
   local home=$1 limit=${2:-30} waited=0
   while ! grep -Fq $'check\tstartup-network' "$home/state/.wake-queue" 2>/dev/null \
@@ -790,6 +805,7 @@ EOF
   out=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
     run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
   wait_for_network_stage "$home" "$root" 60 || fail "the deferred startup stage never published"
+  wait_for_home_summary "$home" 600 || fail "the deferred home summary refresh never published"
 
   jq -e --arg home "$home" '
     .schema == "fm-secondmate-home-summary.v1"
@@ -1828,16 +1844,14 @@ SH
   [ "$(cat "$home/state/home-summary.json")" = "$prior" ] \
     || fail "the summary producer finished before the re-emit returned"
   : > "$release"
-  wait_for_network_stage "$home" "$root" 60 \
-    || fail "the deferred summary worker never finished"
+  wait_for_home_summary "$home" 600 "$prior" \
+    || fail "the deferred refresh never replaced the previous ledger"
   assert_present "$started" "the deferred worker never invoked the summary producer"
   jq -e --arg home "$home" '
     .schema == "fm-secondmate-home-summary.v1" and .home == $home
     and (.generated_epoch | type) == "number"
   ' "$home/state/home-summary.json" >/dev/null \
     || fail "the deferred refresh did not publish a complete ledger"
-  [ "$(cat "$home/state/home-summary.json")" != "$prior" ] \
-    || fail "the deferred refresh never replaced the previous ledger"
 
   # Re-emitting an already-started session is probe-only, not another refresh.
   rm "$started"
