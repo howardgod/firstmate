@@ -608,7 +608,7 @@ fm_backend_herdr_projection_journal_create() {  # <state-dir> <task-id>
 # journal or a version 2 exact projection binding without sourcing shell code.
 # Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
-  local journal=$1 id=$2 lines=0 expected_label expected_task_label exact contents line field
+  local journal=$1 id=$2 lines=0 expected_label expected_task_label exact contents line field status
   local -a values=()
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
@@ -660,6 +660,13 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   case "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" in
     *[!A-Za-z0-9_-]*) return 1 ;;
   esac
+  # The old per-field grep read a line with an encoding error in the current
+  # locale as an empty field, which refused the journal. Keep that refusal:
+  # grep's '.' does not match an encoding error, so -vx finds such lines.
+  # Only status 1 (no such line) accepts; a grep error also refuses.
+  status=0
+  grep -a -v -x -q -e '.*' <<< "$contents" 2>/dev/null || status=$?
+  [ "$status" = 1 ] || return 1
   case "$FM_BACKEND_HERDR_JOURNAL_VERSION:$lines" in
     1:3) return 0 ;;
     2:12) ;;

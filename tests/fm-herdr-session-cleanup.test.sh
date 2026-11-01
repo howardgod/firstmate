@@ -301,6 +301,19 @@ write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE" 'parent = with spaces \ literal'
 fm_herdr_session_cleanup >/dev/null 2>&1
 [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "literal parent-label values changed journal matching"
 pass "v2 label values retain spaces, equals and literal backslashes"
+# The legacy grep parser read an invalidly encoded field as empty under a UTF-8
+# locale, so such a journal was refused. Keep that fail-closed result.
+utf8_locale=$(locale -a 2>/dev/null | grep -i -m1 -E '^(C|en_US)\.utf-?8$' || true)
+if [ -n "$utf8_locale" ]; then
+  reset_fixture
+  write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE" "$(printf 'cap\377tain')"
+  saved_lc_all=${LC_ALL-}
+  export LC_ALL=$utf8_locale
+  assert_preserved "invalid UTF-8 v2 parent label under $utf8_locale"
+  if [ -n "$saved_lc_all" ]; then export LC_ALL=$saved_lc_all; else unset LC_ALL; fi
+else
+  printf 'skip - no UTF-8 locale for the invalid-encoding journal case\n'
+fi
 
 reset_fixture; printf '%s\n' '└ malformed p:AbCdEfGhIjKlMnOpQrStUv' > "$FIXTURE_DIR/title"; assert_preserved "malformed title"
 reset_fixture; printf '%s\n' '└ missing-token' > "$FIXTURE_DIR/title"; assert_preserved "missing token"
