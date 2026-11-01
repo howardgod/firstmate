@@ -608,7 +608,7 @@ fm_backend_herdr_projection_journal_create() {  # <state-dir> <task-id>
 # journal or a version 2 exact projection binding without sourcing shell code.
 # Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
-  local journal=$1 id=$2 lines=0 expected_label expected_task_label exact contents line field status checked
+  local journal=$1 id=$2 lines=0 expected_label expected_task_label exact contents line field status checked utf8_text
   local -a values=()
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
@@ -666,12 +666,14 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
     2:12) printf -v checked '%s\n' "${values[@]}" ;;
     *) return 1 ;;
   esac
-  # Its per-field grep read a field with an encoding error in the current
-  # locale as empty, which refused the journal. Keep that refusal for those
-  # fields: grep's '.' does not match an encoding error, so -vx finds them.
+  # Its per-field grep read a field with an encoding error in a UTF-8 locale
+  # as empty, which refused the journal. Refuse any consumed field that is not
+  # printable ASCII or valid UTF-8, in every locale: LC_ALL=C makes grep match
+  # bytes, and -vx finds a field that the byte pattern does not cover whole.
   # Only status 1 (no such field) accepts; a grep error also refuses.
+  utf8_text=$'([ -~]|[\xc2-\xdf][\x80-\xbf]|\xe0[\xa0-\xbf][\x80-\xbf]|[\xe1-\xec\xee\xef][\x80-\xbf][\x80-\xbf]|\xed[\x80-\x9f][\x80-\xbf]|\xf0[\x90-\xbf][\x80-\xbf][\x80-\xbf]|[\xf1-\xf3][\x80-\xbf][\x80-\xbf][\x80-\xbf]|\xf4[\x80-\x8f][\x80-\xbf][\x80-\xbf])*'
   status=0
-  grep -a -v -x -q -e '.*' <<< "$checked" 2>/dev/null || status=$?
+  LC_ALL=C grep -a -v -x -E -q -e "$utf8_text" <<< "$checked" 2>/dev/null || status=$?
   [ "$status" = 1 ] || return 1
   [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] || return 0
   FM_BACKEND_HERDR_JOURNAL_HOME=${values[3]:-}
