@@ -13,8 +13,10 @@
 # composed from bounded local reads while these checks run concurrently in a
 # detached worker, and their result is reported back inline when it finishes in
 # time, or as a durable wake when it does not. The locked startup's bounded
-# inactive-outcome scan also runs here because its local current-state reads can
-# be just as slow; that scan publishes its own findings to the durable wake queue.
+# inactive-outcome scan and best-effort home-summary refresh also run here because
+# their local current-state reads can be just as slow. The scan publishes its own
+# findings to the durable wake queue; the refresh retains its own atomic ledger
+# publication and failure log (bin/fm-home-summary-refresh.sh).
 #
 # WHAT IS PRESERVED. Nothing is dropped. bin/fm-bootstrap.sh remains the single
 # owner of every network sweep and still runs all of them, unchanged, via its
@@ -52,7 +54,7 @@
 #          worker therefore cannot satisfy a later locked request; the later
 #          request gets a distinct generation and runs the locked phases. A new
 #          owner also gets a distinct generation. --locked 1 asks
-#          for the inactive-outcome scan and mutating sweeps as well as the
+#          for the inactive-outcome scan, home-summary refresh, and mutating sweeps as well as the
 #          read-only probe; --locked 0 asks for the probe only. --harvest-pid
 #          names the session-start process
 #          that will try to print the result inline, so the worker can tell
@@ -106,7 +108,7 @@
 #                             and the wake decision; every wait on it is bounded.
 #
 # The whole stage is bounded by FM_STARTUP_NETWORK_TIMEOUT (default 120s), one
-# aggregate deadline covering both the inactive-outcome scan and network sweeps
+# aggregate deadline covering the inactive-outcome scan, network sweeps, and summary refresh
 # plus every lock the worker waits on before them.
 # Publication and delivery are bounded the same way by FM_SESSION_START_TIMEOUT.
 # A lock that a live process still holds at either deadline ends the worker with
@@ -224,7 +226,7 @@ worker_alive() {
 phase_label() {  # <phases>
   case "$1" in
     probe) printf 'GitHub authentication' ;;
-    probe,sweeps) printf 'GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, and inactive terminal-outcome reconciliation' ;;
+    probe,sweeps) printf 'GitHub authentication, dead-secondmate relaunch, secondmate convergence, pending handoff delivery, project clone refresh with its drift reporting, inactive terminal-outcome reconciliation, and best-effort home-summary publication' ;;
     *) printf 'the deferred network checks' ;;
   esac
 }
@@ -566,12 +568,14 @@ EOF
       downgraded=1
     fi
   fi
-  # One aggregate deadline covers both deferred operations. The inactive scan
+  # One aggregate deadline covers all deferred operations. The inactive scan
   # retains its own tighter per-scan bound inside this outer bound. Findings
   # need no report translation: the scan writes its ordinary durable
-  # inactive-outcome wakes directly. A child shell composes the two executable
+  # inactive-outcome wakes directly. A child shell composes the executable
   # owners only so fm_run_timed can govern them as one process group.
-  # The sweeps get whatever the lock waits above left of the stage budget.
+  # Summary publication runs last so its cost cannot crowd out the sweeps;
+  # ordinary refresh failures stay in its best-effort log, not this report.
+  # The operations get whatever the lock waits above left of the stage budget.
   budget=$(seconds_until "$stage_deadline")
   if [ "$sweep_locked" -eq 1 ]; then
     # shellcheck disable=SC2016  # Child-shell variables expand inside the bound.
@@ -580,7 +584,10 @@ EOF
       bash -c '
         script_dir=$1
         "$script_dir/fm-inactive-reconcile.sh" scan --startup >/dev/null 2>&1 || true
-        exec "$script_dir/fm-bootstrap.sh"
+        "$script_dir/fm-bootstrap.sh"
+        bootstrap_rc=$?
+        "$script_dir/fm-home-summary-refresh.sh" --best-effort >/dev/null 2>&1 || true
+        exit "$bootstrap_rc"
       ' _ "$SCRIPT_DIR" >"$out" 2>&1 || rc=$?
   else
     fm_run_timed "$budget" env FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 \

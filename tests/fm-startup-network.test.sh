@@ -103,6 +103,44 @@ await_worker_record() {  # <home>
   [ -s "$home/state/.startup-network.status" ] || fail "the detached worker never recorded itself"
 }
 
+# Keep the real publisher and its best-effort error logging, replacing only the
+# snapshot boundary to inject an error without touching a live fleet.
+test_summary_failure_is_best_effort_and_requires_locked_work() {
+  local rec home root log marker report
+  rec=$(new_world summary-best-effort)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  marker="${home%/home}/summary.called"
+  rm "$root/bin/fm-fleet-snapshot.sh"
+  cat > "$root/bin/fm-fleet-snapshot.sh" <<SH
+#!/usr/bin/env bash
+: > '$marker'
+printf 'summary fixture failed\\n' >&2
+exit 7
+SH
+  chmod +x "$root/bin/fm-fleet-snapshot.sh"
+  printf '%s\n' $$ > "$home/state/.lock"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" run --locked 0
+  assert_absent "$marker" "a probe-only request refreshed the home summary"
+  FM_FAKE_HARNESS_PID_OVERRIDE=999999999 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" run --locked 1
+  assert_absent "$marker" "a request without lock authority refreshed the home summary"
+  : > "$home/state/.wake-queue"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" run --locked 1
+  assert_present "$marker" "the locked deferred worker never attempted a summary refresh"
+  assert_grep 'summary producer failed with exit 7' "$home/state/.home-summary-refresh.log" \
+    "the best-effort summary failure lost its existing diagnostic"
+  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = 'done' ] \
+    || fail "a best-effort summary failure changed the deferred checks result"
+  [ ! -s "$home/state/.wake-queue" ] || fail "a best-effort summary failure queued a network wake"
+  report=$(run_stage "$home" "$root" report)
+  assert_not_contains "$report" 'summary fixture failed' "summary stderr leaked into the network report"
+  pass "fm-startup-network: summary refresh requires lock authority and failures stay best-effort"
+}
+
 test_wait_fails_without_a_published_stage() {
   local rec home root log
   rec=$(new_world wait-without-stage)
@@ -859,6 +897,7 @@ EOF
   pass "fm-startup-network: a held publish lock ends the worker inside its budget with a failed-rerun record"
 }
 
+test_summary_failure_is_best_effort_and_requires_locked_work
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it

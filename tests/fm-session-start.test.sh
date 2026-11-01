@@ -787,7 +787,9 @@ EOF
   : > "$home/data/captain.md"
   # secondmates.md, captain-shared.md, and learnings.md deliberately absent
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  wait_for_network_stage "$home" "$root" 60 || fail "the deferred startup stage never published"
 
   jq -e --arg home "$home" '
     .schema == "fm-secondmate-home-summary.v1"
@@ -1754,6 +1756,80 @@ EOF
 }
 
 # --- deferred network stage -------------------------------------------------
+
+# Hold the real summary publisher at its snapshot boundary until the digest has
+# returned. A timeout still exits zero in best-effort mode, so also assert that
+# returning did not merely wait out the publisher's deadline.
+test_home_summary_refresh_never_blocks_the_digest() {
+  local rec root home fakebin out f release started prior
+  rec=$(new_world home-summary-deferred)
+  IFS='|' read -r root home fakebin <<EOF
+$rec
+EOF
+  make_fake_toolchain "$fakebin"
+  make_fake_ps_claude "$fakebin"
+  mkdir -p "$root/bin"
+  for f in "$ROOT"/bin/*; do
+    ln -s "$f" "$root/bin/$(basename "$f")"
+  done
+  ln -s "$ROOT/docs" "$root/docs"
+  rm "$root/bin/fm-fleet-snapshot.sh"
+  cat > "$root/bin/fm-fleet-snapshot.sh" <<'SH'
+#!/usr/bin/env bash
+set -u
+[ "${1:-}" = --secondmate-home-summary ] || exec "${FM_REAL_SNAPSHOT:?}" "$@"
+: > "${FM_FAKE_SUMMARY_STARTED:?}"
+ticks=0
+while [ ! -e "${FM_FAKE_SUMMARY_RELEASE:?}" ] && [ "$ticks" -lt 400 ]; do
+  sleep 0.1
+  ticks=$((ticks + 1))
+done
+exec "${FM_REAL_SNAPSHOT:?}" "$@"
+SH
+  chmod +x "$root/bin/fm-fleet-snapshot.sh"
+  release="${root%/root}/summary.release"
+  started="${root%/root}/summary.started"
+
+  # A previous complete ledger remains readable until atomic replacement.
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    FM_SNAPSHOT_NOW=2020-01-01T00:00:00Z FM_SNAPSHOT_NOW_EPOCH=1577836800 \
+    "$ROOT/bin/fm-home-summary-refresh.sh" || fail "could not seed a prior ledger"
+  prior=$(cat "$home/state/home-summary.json")
+  out=$(FM_FAKE_SUMMARY_STARTED="$started" FM_FAKE_SUMMARY_RELEASE="$release" \
+    FM_REAL_SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh" FM_HOME_SUMMARY_TIMEOUT=30 \
+    FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    SESSION_START="$root/bin/fm-session-start.sh" \
+    run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+
+  assert_contains "$out" "NEXT STEP" "the digest did not complete while the summary was outstanding"
+  assert_not_contains "$out" "STARTUP TRUNCATED -" "the slow summary truncated the digest"
+  [ ! -s "$home/state/.home-summary-refresh.log" ] \
+    || fail "the digest waited for the summary deadline instead of deferring it"
+  [ "$(cat "$home/state/home-summary.json")" = "$prior" ] \
+    || fail "an outstanding refresh replaced the prior complete ledger"
+  : > "$release"
+  wait_for_network_stage "$home" "$root" 60 \
+    || fail "the deferred summary worker never finished"
+  assert_present "$started" "the deferred worker never invoked the summary producer"
+  jq -e --arg home "$home" '
+    .schema == "fm-secondmate-home-summary.v1" and .home == $home
+    and (.generated_epoch | type) == "number"
+  ' "$home/state/home-summary.json" >/dev/null \
+    || fail "the deferred refresh did not publish a complete ledger"
+  [ "$(cat "$home/state/home-summary.json")" != "$prior" ] \
+    || fail "the deferred refresh never replaced the previous ledger"
+
+  # Re-emitting an already-started session is probe-only, not another refresh.
+  rm "$started"
+  FM_HOME="$home" FM_ROOT_OVERRIDE="$root" PATH="$fakebin:$BASE_PATH" \
+    FM_FAKE_HARNESS_PID="$SESSION_START_TEST_HARNESS_PID" \
+    FM_FAKE_SUMMARY_STARTED="$started" FM_FAKE_SUMMARY_RELEASE="$release" \
+    FM_REAL_SNAPSHOT="$ROOT/bin/fm-fleet-snapshot.sh" \
+    "$root/bin/fm-session-start.sh" --reemit >/dev/null
+  wait_for_network_stage "$home" "$root" 60 || fail "the re-emit probe never finished"
+  assert_absent "$started" "a context re-emit repeated the home summary refresh"
+  pass "session start: a slow summary never blocks the digest, publishes later, and is skipped on re-emit"
+}
 
 # install_slow_gh <fakebin> <seconds>: one external-network call the digest used
 # to make directly. Making it pathologically slow is how a test stands in for an
@@ -3081,6 +3157,7 @@ EOF
   pass "session start rejects Pi loaded markers from previous sessions"
 }
 
+test_home_summary_refresh_never_blocks_the_digest
 test_context_digest_absent_empty_present
 test_lock_refusal_read_only_path
 test_lock_write_failure_read_only_path
