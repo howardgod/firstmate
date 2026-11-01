@@ -21,10 +21,11 @@
 #
 # With --best-effort, a failure is appended to the bounded home-local
 # state/.home-summary-refresh.log when available, with stderr as the bounded
-# fallback, and the command exits zero. Session start, watcher, spawn, and
-# teardown use that mode so this side-band publication can never change their
-# result. Without it, failures are printed and returned to the direct caller
-# for tests and diagnostics.
+# fallback, and the command exits zero. Session start's deferred worker
+# (bin/fm-startup-network.sh), watcher, spawn, and teardown use that mode so
+# this side-band publication can never change their result. Without it,
+# failures are printed and returned to the direct caller for tests and
+# diagnostics.
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
