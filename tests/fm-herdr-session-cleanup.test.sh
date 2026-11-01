@@ -310,6 +310,12 @@ if [ -n "$utf8_locale" ]; then
   saved_lc_all=${LC_ALL-}
   export LC_ALL=$utf8_locale
   assert_preserved "invalid UTF-8 v2 parent label under $utf8_locale"
+  # The legacy parser never read unknown lines, so their encoding did not matter.
+  reset_fixture
+  printf 'junk=\377' >> "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+  fm_herdr_session_cleanup >/dev/null 2>&1
+  [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "invalid UTF-8 in an unknown unterminated v1 suffix changed matching"
+  pass "invalid UTF-8 in an unknown unterminated v1 suffix keeps the legacy match under $utf8_locale"
   if [ -n "$saved_lc_all" ]; then export LC_ALL=$saved_lc_all; else unset LC_ALL; fi
 else
   printf 'skip - no UTF-8 locale for the invalid-encoding journal case\n'

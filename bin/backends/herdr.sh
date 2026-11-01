@@ -608,7 +608,7 @@ fm_backend_herdr_projection_journal_create() {  # <state-dir> <task-id>
 # journal or a version 2 exact projection binding without sourcing shell code.
 # Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
-  local journal=$1 id=$2 lines=0 expected_label expected_task_label exact contents line field status
+  local journal=$1 id=$2 lines=0 expected_label expected_task_label exact contents line field status checked
   local -a values=()
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
@@ -660,18 +660,20 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   case "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" in
     *[!A-Za-z0-9_-]*) return 1 ;;
   esac
-  # The old per-field grep read a line with an encoding error in the current
-  # locale as an empty field, which refused the journal. Keep that refusal:
-  # grep's '.' does not match an encoding error, so -vx finds such lines.
-  # Only status 1 (no such line) accepts; a grep error also refuses.
-  status=0
-  grep -a -v -x -q -e '.*' <<< "$contents" 2>/dev/null || status=$?
-  [ "$status" = 1 ] || return 1
+  # The old parser read only the version's known fields (3 for v1, 12 for v2).
   case "$FM_BACKEND_HERDR_JOURNAL_VERSION:$lines" in
-    1:3) return 0 ;;
-    2:12) ;;
+    1:3) printf -v checked '%s\n' "${values[0]-}" "${values[1]-}" "${values[2]-}" ;;
+    2:12) printf -v checked '%s\n' "${values[@]}" ;;
     *) return 1 ;;
   esac
+  # Its per-field grep read a field with an encoding error in the current
+  # locale as empty, which refused the journal. Keep that refusal for those
+  # fields: grep's '.' does not match an encoding error, so -vx finds them.
+  # Only status 1 (no such field) accepts; a grep error also refuses.
+  status=0
+  grep -a -v -x -q -e '.*' <<< "$checked" 2>/dev/null || status=$?
+  [ "$status" = 1 ] || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] || return 0
   FM_BACKEND_HERDR_JOURNAL_HOME=${values[3]:-}
   FM_BACKEND_HERDR_JOURNAL_SESSION=${values[4]:-}
   FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID=${values[5]:-}
