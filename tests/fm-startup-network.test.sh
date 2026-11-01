@@ -141,6 +141,37 @@ SH
   pass "fm-startup-network: summary refresh requires lock authority and failures stay best-effort"
 }
 
+# The optional summary must fit inside what the sweeps leave of the stage
+# budget: a summary that keeps its own 60s deadline would trip the 12s stage
+# bound and publish successful sweeps as a timeout with a network wake.
+test_slow_summary_cannot_turn_finished_sweeps_into_a_timeout() {
+  local rec home root log marker
+  rec=$(new_world summary-slow)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  marker="${home%/home}/summary.called"
+  rm "$root/bin/fm-fleet-snapshot.sh"
+  cat > "$root/bin/fm-fleet-snapshot.sh" <<SH
+#!/usr/bin/env bash
+: > '$marker'
+sleep 60
+SH
+  chmod +x "$root/bin/fm-fleet-snapshot.sh"
+  printf '%s\n' $$ > "$home/state/.lock"
+  : > "$home/state/.wake-queue"
+
+  FM_STARTUP_NETWORK_TIMEOUT=12 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" run --locked 1
+  assert_present "$marker" "the slow summary never started inside the remaining budget"
+  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = 'done' ] \
+    || fail "a slow optional summary turned finished sweeps into $(sed -n 's/^state=//p' "$home/state/.startup-network.status")"
+  [ ! -s "$home/state/.wake-queue" ] || fail "a slow optional summary queued a network wake"
+  assert_grep 'refresh exceeded its' "$home/state/.home-summary-refresh.log" \
+    "the clamped summary did not log its own best-effort deadline"
+  pass "fm-startup-network: a slow summary stays inside the stage budget and keeps the sweep result"
+}
+
 test_wait_fails_without_a_published_stage() {
   local rec home root log
   rec=$(new_world wait-without-stage)
@@ -898,6 +929,7 @@ EOF
 }
 
 test_summary_failure_is_best_effort_and_requires_locked_work
+test_slow_summary_cannot_turn_finished_sweeps_into_a_timeout
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it

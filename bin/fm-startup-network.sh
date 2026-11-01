@@ -575,6 +575,8 @@ EOF
   # owners only so fm_run_timed can govern them as one process group.
   # Summary publication runs last so its cost cannot crowd out the sweeps;
   # ordinary refresh failures stay in its best-effort log, not this report.
+  # Its deadline fits inside what the sweeps leave, with room for its failure
+  # log, so the bootstrap exit status always decides the stage result.
   # The operations get whatever the lock waits above left of the stage budget.
   budget=$(seconds_until "$stage_deadline")
   if [ "$sweep_locked" -eq 1 ]; then
@@ -583,12 +585,20 @@ EOF
       FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_NETWORK_LOCK_PID="$lock_pid" \
       bash -c '
         script_dir=$1
+        stage_deadline=$2
         "$script_dir/fm-inactive-reconcile.sh" scan --startup >/dev/null 2>&1 || true
         "$script_dir/fm-bootstrap.sh"
         bootstrap_rc=$?
-        "$script_dir/fm-home-summary-refresh.sh" --best-effort >/dev/null 2>&1 || true
+        summary_left=$(( stage_deadline - $(date +%s) - 6 ))
+        if [ "$summary_left" -ge 1 ]; then
+          summary_timeout=${FM_HOME_SUMMARY_TIMEOUT:-60}
+          case "$summary_timeout" in ""|*[!0-9]*|0*) summary_timeout=60 ;; esac
+          [ "$summary_timeout" -le "$summary_left" ] || summary_timeout=$summary_left
+          FM_HOME_SUMMARY_TIMEOUT=$summary_timeout \
+            "$script_dir/fm-home-summary-refresh.sh" --best-effort >/dev/null 2>&1 || true
+        fi
         exit "$bootstrap_rc"
-      ' _ "$SCRIPT_DIR" >"$out" 2>&1 || rc=$?
+      ' _ "$SCRIPT_DIR" "$stage_deadline" >"$out" 2>&1 || rc=$?
   else
     fm_run_timed "$budget" env FM_BOOTSTRAP_NETWORK=only FM_BOOTSTRAP_DETECT_ONLY=1 \
       "$SCRIPT_DIR/fm-bootstrap.sh" >"$out" 2>&1 || rc=$?
