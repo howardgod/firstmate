@@ -13,8 +13,12 @@
 # composed from bounded local reads while these checks run concurrently in a
 # detached worker, and their result is reported back inline when it finishes in
 # time, or as a durable wake when it does not. The locked startup's bounded
-# inactive-outcome scan also runs here because its local current-state reads can
-# be just as slow; that scan publishes its own findings to the durable wake queue.
+# inactive-outcome scan and best-effort home-summary refresh also run here because
+# their local current-state reads can be just as slow. The scan publishes its own
+# findings to the durable wake queue. The refresh is detached once the sweep
+# result is recorded, so it never delays that result, and it keeps its own
+# deadline, atomic ledger publication, and failure log
+# (bin/fm-home-summary-refresh.sh).
 #
 # WHAT IS PRESERVED. Nothing is dropped. bin/fm-bootstrap.sh remains the single
 # owner of every network sweep and still runs all of them, unchanged, via its
@@ -52,7 +56,7 @@
 #          worker therefore cannot satisfy a later locked request; the later
 #          request gets a distinct generation and runs the locked phases. A new
 #          owner also gets a distinct generation. --locked 1 asks
-#          for the inactive-outcome scan and mutating sweeps as well as the
+#          for the inactive-outcome scan, home-summary refresh, and mutating sweeps as well as the
 #          read-only probe; --locked 0 asks for the probe only. --harvest-pid
 #          names the session-start process
 #          that will try to print the result inline, so the worker can tell
@@ -61,6 +65,7 @@
 #          Run the checks in the foreground and publish the result. This is what
 #          `start` detaches with its private generation reservation; run it
 #          directly to redo the stage by hand from the lock-owning harness.
+#          A direct run does not refresh the home summary.
 #          Exits non-zero when the stage was refused or could not publish,
 #          including a lock a live process still held at its deadline.
 #        fm-startup-network.sh harvest --pid <pid>
@@ -127,6 +132,7 @@ CLAIM_FILE="$STATE/.startup-network.claim"
 DELIVERED_FILE="$STATE/.startup-network.delivered"
 TIMINGS_FILE="$STATE/.startup-network.timings"
 PUBLISH_LOCK="$STATE/.startup-network.lock"
+REFRESH_SUMMARY_AFTER_RECORD=0
 
 # shellcheck source=bin/fm-timeout-lib.sh
 . "$SCRIPT_DIR/fm-timeout-lib.sh"
@@ -455,6 +461,10 @@ publish() {  # <generation> <state> <phases> <locked> <started> <rc> <output-fil
   fi
   state=$(record_result "$generation" "$state" "$phases" "$locked" "$started" "$rc" "$out" "$timings")
   fm_lock_release "$PUBLISH_LOCK"
+  if [ "$REFRESH_SUMMARY_AFTER_RECORD" -eq 1 ]; then
+    FM_HOME="$FM_HOME" FM_STATE_OVERRIDE="$STATE" \
+      "$SCRIPT_DIR/fm-home-summary-refresh.sh" --best-effort </dev/null >/dev/null 2>&1 &
+  fi
   await_delivery "$generation" "$state"
 }
 
@@ -566,6 +576,9 @@ EOF
       downgraded=1
     fi
   fi
+  # Only the worker a session start launched publishes the home summary, after
+  # its sweep result is recorded; a direct rerun does not.
+  [ "$internal" -eq 0 ] || [ "$sweep_locked" -eq 0 ] || REFRESH_SUMMARY_AFTER_RECORD=1
   # One aggregate deadline covers both deferred operations. The inactive scan
   # retains its own tighter per-scan bound inside this outer bound. Findings
   # need no report translation: the scan writes its ordinary durable

@@ -103,6 +103,146 @@ await_worker_record() {  # <home>
   [ -s "$home/state/.startup-network.status" ] || fail "the detached worker never recorded itself"
 }
 
+# The home summary refresh is detached from the worker, so a test waits for its
+# own failure log rather than for the stage.
+await_summary_log() {  # <home> <fixed-string>
+  local home=$1 text=$2 ticks=0
+  while ! grep -Fq "$text" "$home/state/.home-summary-refresh.log" 2>/dev/null \
+    && [ "$ticks" -lt 300 ]; do
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  grep -Fq "$text" "$home/state/.home-summary-refresh.log" 2>/dev/null
+}
+
+# Keep the real publisher and its best-effort error logging, replacing only the
+# snapshot boundary to inject an error without touching a live fleet.
+test_summary_failure_is_best_effort_and_requires_locked_work() {
+  local rec home root log marker report
+  rec=$(new_world summary-best-effort)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  marker="${home%/home}/summary.called"
+  rm "$root/bin/fm-fleet-snapshot.sh"
+  cat > "$root/bin/fm-fleet-snapshot.sh" <<SH
+#!/usr/bin/env bash
+: > '$marker'
+printf 'summary fixture failed\\n' >&2
+exit 7
+SH
+  chmod +x "$root/bin/fm-fleet-snapshot.sh"
+  printf '%s\n' $$ > "$home/state/.lock"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" run --locked 0
+  FM_FAKE_HARNESS_PID_OVERRIDE=999999999 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" run --locked 1
+  FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" run --locked 1
+  FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" start --locked 0 --harvest-pid $$
+  run_stage "$home" "$root" harvest --pid $$ >/dev/null
+  run_stage "$home" "$root" wait 20 || fail "the probe-only worker never published"
+  sleep 2
+  assert_absent "$marker" "a probe-only, unowned, or direct run refreshed the home summary"
+  : > "$home/state/.wake-queue"
+
+  FM_FAKE_BOOTSTRAP_LOG="$log" run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+  run_stage "$home" "$root" harvest --pid $$ >/dev/null
+  run_stage "$home" "$root" wait 20 || fail "the locked worker never published"
+  await_summary_log "$home" 'summary producer failed with exit 7' \
+    || fail "the best-effort summary failure lost its existing diagnostic"
+  assert_present "$marker" "the locked deferred worker never attempted a summary refresh"
+  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = 'done' ] \
+    || fail "a best-effort summary failure changed the deferred checks result"
+  [ ! -s "$home/state/.wake-queue" ] || fail "a best-effort summary failure queued a network wake"
+  report=$(run_stage "$home" "$root" report)
+  assert_not_contains "$report" 'summary fixture failed' "summary stderr leaked into the network report"
+  pass "fm-startup-network: only a locked started worker refreshes the summary, and failures stay best-effort"
+}
+
+# The detached summary keeps its own deadline even past the stage budget: the
+# finished sweeps stay `done` with no network wake, and the expired refresh
+# still logs its deadline the way bin/fm-home-summary-refresh.sh always has.
+test_slow_summary_cannot_turn_finished_sweeps_into_a_timeout() {
+  local rec home root log marker
+  rec=$(new_world summary-slow)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  marker="${home%/home}/summary.called"
+  rm "$root/bin/fm-fleet-snapshot.sh"
+  cat > "$root/bin/fm-fleet-snapshot.sh" <<SH
+#!/usr/bin/env bash
+: > '$marker'
+sleep 60
+SH
+  chmod +x "$root/bin/fm-fleet-snapshot.sh"
+  printf '%s\n' $$ > "$home/state/.lock"
+  : > "$home/state/.wake-queue"
+
+  FM_STARTUP_NETWORK_TIMEOUT=8 FM_HOME_SUMMARY_TIMEOUT=12 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+  run_stage "$home" "$root" harvest --pid $$ >/dev/null
+  run_stage "$home" "$root" wait 20 || fail "the locked worker never published"
+  await_summary_log "$home" 'refresh exceeded its 12-second deadline' \
+    || fail "the detached summary did not log its own best-effort deadline"
+  assert_present "$marker" "the slow summary never started"
+  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = 'done' ] \
+    || fail "a slow optional summary turned finished sweeps into $(sed -n 's/^state=//p' "$home/state/.startup-network.status")"
+  [ ! -s "$home/state/.wake-queue" ] || fail "a slow optional summary queued a network wake"
+  pass "fm-startup-network: a slow summary keeps its own deadline and the sweep result"
+}
+
+# A held summary producer must not hold back the sweep result, and the summary
+# must not wait for a late harvest: it starts while the session-start claimant
+# has still not harvested, and harvest then prints the sweeps as finished.
+test_slow_summary_does_not_delay_published_sweep_results() {
+  local rec home root log started release report ticks=0
+  rec=$(new_world summary-after-publish)
+  IFS='|' read -r home root log <<EOF
+$rec
+EOF
+  started="${home%/home}/summary.started"
+  release="${home%/home}/summary.release"
+  rm "$root/bin/fm-fleet-snapshot.sh"
+  cat > "$root/bin/fm-fleet-snapshot.sh" <<SH
+#!/usr/bin/env bash
+: > '$started'
+ticks=0
+while [ ! -e '$release' ] && [ "\$ticks" -lt 400 ]; do
+  sleep 0.1
+  ticks=\$((ticks + 1))
+done
+exit 7
+SH
+  chmod +x "$root/bin/fm-fleet-snapshot.sh"
+  printf '%s\n' $$ > "$home/state/.lock"
+  : > "$home/state/.wake-queue"
+
+  FM_SESSION_START_TIMEOUT=60 FM_FAKE_BOOTSTRAP_LOG="$log" \
+    FM_FAKE_BOOTSTRAP_OUT='BOOTSTRAP_INFO: sweeps finished' \
+    run_stage "$home" "$root" start --locked 1 --harvest-pid $$
+  while [ ! -e "$started" ] && [ "$ticks" -lt 300 ]; do
+    sleep 0.1
+    ticks=$((ticks + 1))
+  done
+  assert_present "$started" "the summary waited for the session-start harvest"
+  [ "$(sed -n 's/^state=//p' "$home/state/.startup-network.status")" = 'done' ] \
+    || fail "the sweep result was not published before the summary producer ran"
+  report=$(run_stage "$home" "$root" harvest --pid $$)
+  assert_contains "$report" "completed off the startup path" \
+    "harvest reported finished sweeps as pending while the summary ran: $report"
+  assert_contains "$report" "BOOTSTRAP_INFO: sweeps finished" \
+    "harvest did not print the published sweep result while the summary ran: $report"
+  assert_not_contains "$report" "home-summary" "the stage report named the best-effort summary"
+  [ ! -s "$home/state/.home-summary-refresh.log" ] \
+    || fail "the summary producer finished before the sweep result was checked"
+  : > "$release"
+  await_summary_log "$home" 'summary producer failed with exit 7' \
+    || fail "the summary refresh did not log its own best-effort failure after publication"
+  [ ! -s "$home/state/.wake-queue" ] || fail "a best-effort summary failure queued a network wake"
+  pass "fm-startup-network: a slow summary starts before a late harvest and never delays the sweep result"
+}
+
 test_wait_fails_without_a_published_stage() {
   local rec home root log
   rec=$(new_world wait-without-stage)
@@ -859,6 +999,9 @@ EOF
   pass "fm-startup-network: a held publish lock ends the worker inside its budget with a failed-rerun record"
 }
 
+test_summary_failure_is_best_effort_and_requires_locked_work
+test_slow_summary_cannot_turn_finished_sweeps_into_a_timeout
+test_slow_summary_does_not_delay_published_sweep_results
 test_wait_fails_without_a_published_stage
 test_start_returns_without_holding_the_callers_stdout
 test_harvest_acknowledgement_suppresses_the_wake_and_no_claim_produces_it
