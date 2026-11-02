@@ -170,6 +170,13 @@ fm_backend_herdr_cli() {
       ;;
     "api snapshot")
       : > "$FIXTURE_DIR/snapshotted"
+      if [ -e "$FIXTURE_DIR/journal-duplicate-race" ]; then
+        write_v1 fm-task
+      elif [ -e "$FIXTURE_DIR/journal-binding-race" ]; then
+        write_v2 "$FM_HOME" "$WS" "$TAB" w9:p1
+      elif [ -e "$FIXTURE_DIR/journal-remove-race" ]; then
+        rm -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+      fi
       printf '{"result":{"snapshot":{"focused_workspace_id":"w1","focused_tab_id":"%s","focused_pane_id":"w1:p1","workspaces":' "$(cat "$FIXTURE_DIR/active-tab")"
       fixture_workspaces
       printf ',"tabs":'; fixture_tabs
@@ -191,6 +198,9 @@ fm_backend_herdr_projection_close_pane_focus_preserving() {
   [ "${3:-}" = no-agent ] || return 1
   printf '%s\n' "$*" >> "$CLOSE_LOG"
   : > "$FIXTURE_DIR/closed"
+  if [ -e "$FIXTURE_DIR/journal-after-close" ]; then
+    write_v1 "$ID" ZyXwVuTsRqPoNmLkJiHgFe
+  fi
 }
 
 write_v1() { # <id> [token]
@@ -210,7 +220,7 @@ write_v2() { # <home> <workspace> <tab> <pane>
     printf 'projection_id=%s\n' "$TOKEN"
     printf 'home=%s\n' "$home"
     printf 'session=test\nworkspace_id=%s\ntab_id=%s\npane_id=%s\n' "$workspace" "$tab" "$pane"
-    printf 'parent_workspace_id=w1\nparent_label=firstmate\nworkspace_label=%s\ntask_label=fm-%s\n' "$TITLE" "$ID"
+    printf 'parent_workspace_id=w1\nparent_label=%s\nworkspace_label=%s\ntask_label=fm-%s\n' "${5:-firstmate}" "$TITLE" "$ID"
   } > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
 }
 
@@ -253,6 +263,74 @@ fm_herdr_session_cleanup >/dev/null 2>&1
 [ "$(wc -l < "$CLOSE_LOG" | tr -d ' ')" = 1 ] || fail "repeat cleanup closed again"
 pass "successful cleanup is idempotent on repeat"
 
+# The file parser must retain the old journal acceptance rules, not just the
+# ordinary writer's field order. Drive every case through the public cleanup.
+reset_fixture
+printf 'projection_id=%s\nversion=1\ntask_id=%s\n' "$TOKEN" "$ID" > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "reordered v1 journal was not cleaned"
+pass "reordered valid v1 fields retain the same matching result"
+reset_fixture
+printf 'version=1\nversion=1\nprojection_id=%s\n' "$TOKEN" > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+assert_preserved "duplicate field replacing a required field"
+reset_fixture
+printf 'version=1\ntask_id=%s\nprojection_id=%s' "$ID" "$TOKEN" > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+assert_preserved "missing final newline"
+reset_fixture
+printf 'unexpected=value\n' >> "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+assert_preserved "extra journal line"
+reset_fixture
+printf 'ignored=unterminated' >> "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "legacy unterminated unknown suffix changed matching"
+pass "legacy newline-count behavior is preserved for an unknown unterminated suffix"
+reset_fixture
+printf '\0' >> "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+assert_preserved "binary journal"
+reset_fixture
+mv "$FM_STATE_OVERRIDE/$ID.herdr-presentation" "$TMP_ROOT/external-journal"
+ln -s "$TMP_ROOT/external-journal" "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+assert_preserved "symlink journal"
+reset_fixture
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE"
+sed 's/^session=test$/session=other/' "$FM_STATE_OVERRIDE/$ID.herdr-presentation" > "$TMP_ROOT/other-session"
+mv "$TMP_ROOT/other-session" "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+assert_preserved "wrong-session v2 journal"
+reset_fixture
+write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE" 'parent = with spaces \ literal'
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "literal parent-label values changed journal matching"
+pass "v2 label values retain spaces, equals and literal backslashes"
+# The legacy grep parser read an invalidly encoded field as empty under a UTF-8
+# locale, which refused the journal. Refuse a consumed field holding invalid
+# UTF-8 or a control byte in every locale, keep valid UTF-8 text, and ignore
+# the encoding of lines the parser never consumes.
+test_locales=C
+utf8_locale=$(locale -a 2>/dev/null | grep -i -m1 -E '^(C|en_US)\.utf-?8$' || true)
+[ -z "$utf8_locale" ] || test_locales="C $utf8_locale"
+saved_lc_all=${LC_ALL-}
+had_lc_all=${LC_ALL+set}
+for test_locale in $test_locales; do
+  export LC_ALL=$test_locale
+  reset_fixture
+  write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE" "$(printf 'cap\377tain')"
+  assert_preserved "invalid UTF-8 v2 parent label under $test_locale"
+  reset_fixture
+  write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE" "$(printf 'cap\001tain')"
+  assert_preserved "control byte in v2 parent label under $test_locale"
+  reset_fixture
+  write_v2 "$FM_HOME" "$WS" "$TAB" "$PANE" "$(printf 'capit\303\241n \350\210\271\351\225\267')"
+  fm_herdr_session_cleanup >/dev/null 2>&1
+  [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "valid UTF-8 v2 parent label changed matching under $test_locale"
+  pass "valid UTF-8 v2 parent label keeps the match under $test_locale"
+  reset_fixture
+  printf 'junk=\377' >> "$FM_STATE_OVERRIDE/$ID.herdr-presentation"
+  fm_herdr_session_cleanup >/dev/null 2>&1
+  [ ! -e "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "invalid UTF-8 in an unknown unterminated v1 suffix changed matching under $test_locale"
+  pass "invalid UTF-8 in an unknown unterminated v1 suffix keeps the legacy match under $test_locale"
+done
+if [ -n "$had_lc_all" ]; then export LC_ALL=$saved_lc_all; else unset LC_ALL; fi
+
 reset_fixture; printf '%s\n' '└ malformed p:AbCdEfGhIjKlMnOpQrStUv' > "$FIXTURE_DIR/title"; assert_preserved "malformed title"
 reset_fixture; printf '%s\n' '└ missing-token' > "$FIXTURE_DIR/title"; assert_preserved "missing token"
 reset_fixture; printf 'version=1\ntask_id=%s\nprojection_id=short\n' "$ID" > "$FM_STATE_OVERRIDE/$ID.herdr-presentation"; assert_preserved "malformed journal"
@@ -281,6 +359,17 @@ reset_fixture; : > "$FIXTURE_DIR/error-workspace-get"; assert_preserved "unreada
 reset_fixture; : > "$FIXTURE_DIR/race"; assert_preserved "revalidation race"
 reset_fixture; printf '%s\n' "$TAB" > "$FIXTURE_DIR/active-tab"; assert_preserved "active target"
 reset_fixture; : > "$FIXTURE_DIR/focus-refuse"; assert_preserved "focus refusal"
+reset_fixture; : > "$FIXTURE_DIR/journal-duplicate-race"; assert_preserved "new ambiguous journal after indexing"
+reset_fixture; : > "$FIXTURE_DIR/journal-binding-race"; assert_preserved "journal endpoint changed after indexing"
+reset_fixture; : > "$FIXTURE_DIR/journal-remove-race"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ ! -s "$CLOSE_LOG" ] || fail "journal removed after indexing still authorized closure"
+pass "journal removed after indexing preserves the pane"
+reset_fixture; : > "$FIXTURE_DIR/journal-after-close"
+fm_herdr_session_cleanup >/dev/null 2>&1
+[ -s "$CLOSE_LOG" ] || fail "post-close journal race did not exercise a real fixture closure"
+[ -f "$FM_STATE_OVERRIDE/$ID.herdr-presentation" ] || fail "journal replacement after closure was retired"
+pass "fresh post-close matching preserves a replacement journal"
 
 INTEGRATION_ROOT="$TMP_ROOT/bootstrap-integration"
 mkdir -p "$INTEGRATION_ROOT/home/state" "$INTEGRATION_ROOT/home/data" "$INTEGRATION_ROOT/home/config"

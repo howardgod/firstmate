@@ -604,18 +604,12 @@ fm_backend_herdr_projection_journal_create() {  # <state-dir> <task-id>
   printf '%s' "$token"
 }
 
-fm_backend_herdr_projection_journal_field() {  # <journal> <key>
-  local journal=$1 key=$2 count
-  count=$(grep -c "^${key}=" "$journal" 2>/dev/null || true)
-  [ "$count" = 1 ] || return 1
-  grep "^${key}=" "$journal" 2>/dev/null | cut -d= -f2-
-}
-
 # fm_backend_herdr_projection_journal_snapshot: validate a version 1 attempt
 # journal or a version 2 exact projection binding without sourcing shell code.
 # Version 2 sets FM_BACKEND_HERDR_JOURNAL_* globals for same-process callers.
 fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
-  local journal=$1 id=$2 lines expected_label expected_task_label exact
+  local journal=$1 id=$2 lines=0 expected_label expected_task_label exact contents line field status checked utf8_text
+  local -a values=()
   FM_BACKEND_HERDR_JOURNAL_VERSION=""
   FM_BACKEND_HERDR_JOURNAL_TASK_ID=""
   FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=""
@@ -629,29 +623,68 @@ fm_backend_herdr_projection_journal_snapshot() {  # <journal> <task-id>
   FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=""
   FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=""
   [ -f "$journal" ] && [ ! -L "$journal" ] || return 1
-  lines=$(wc -l < "$journal" 2>/dev/null | tr -d '[:space:]')
-  FM_BACKEND_HERDR_JOURNAL_VERSION=$(fm_backend_herdr_projection_journal_field "$journal" version) || return 1
-  FM_BACKEND_HERDR_JOURNAL_TASK_ID=$(fm_backend_herdr_projection_journal_field "$journal" task_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=$(fm_backend_herdr_projection_journal_field "$journal" projection_id) || return 1
+  # One builtin file read replaces the per-field grep/cut subprocesses. A NUL
+  # delimiter also refuses binary input instead of silently dropping NUL bytes.
+  contents=
+  if IFS= read -r -d '' contents < "$journal"; then
+    return 1
+  fi
+  while IFS= read -r line; do
+    lines=$((lines + 1))
+    case "$line" in
+      version=*) field=0 ;;
+      task_id=*) field=1 ;;
+      projection_id=*) field=2 ;;
+      home=*) field=3 ;;
+      session=*) field=4 ;;
+      workspace_id=*) field=5 ;;
+      tab_id=*) field=6 ;;
+      pane_id=*) field=7 ;;
+      parent_workspace_id=*) field=8 ;;
+      parent_label=*) field=9 ;;
+      workspace_label=*) field=10 ;;
+      task_label=*) field=11 ;;
+      *) continue ;;
+    esac
+    [ "${values[$field]+present}" != present ] || return 1
+    values[field]=${line#*=}
+  done <<< "$contents"
+  # The here-string adds one newline; preserve the old wc -l semantics,
+  # including rejection of an otherwise complete unterminated journal.
+  lines=$((lines - 1))
+  FM_BACKEND_HERDR_JOURNAL_VERSION=${values[0]:-}
+  FM_BACKEND_HERDR_JOURNAL_TASK_ID=${values[1]:-}
+  FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID=${values[2]:-}
   [ "$FM_BACKEND_HERDR_JOURNAL_TASK_ID" = "$id" ] || return 1
   [ "${#FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID}" -eq 22 ] || return 1
   case "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" in
     *[!A-Za-z0-9_-]*) return 1 ;;
   esac
+  # The old parser read only the version's known fields (3 for v1, 12 for v2).
   case "$FM_BACKEND_HERDR_JOURNAL_VERSION:$lines" in
-    1:3) return 0 ;;
-    2:12) ;;
+    1:3) printf -v checked '%s\n' "${values[0]-}" "${values[1]-}" "${values[2]-}" ;;
+    2:12) printf -v checked '%s\n' "${values[@]}" ;;
     *) return 1 ;;
   esac
-  FM_BACKEND_HERDR_JOURNAL_HOME=$(fm_backend_herdr_projection_journal_field "$journal" home) || return 1
-  FM_BACKEND_HERDR_JOURNAL_SESSION=$(fm_backend_herdr_projection_journal_field "$journal" session) || return 1
-  FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID=$(fm_backend_herdr_projection_journal_field "$journal" workspace_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_TAB_ID=$(fm_backend_herdr_projection_journal_field "$journal" tab_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_PANE_ID=$(fm_backend_herdr_projection_journal_field "$journal" pane_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID=$(fm_backend_herdr_projection_journal_field "$journal" parent_workspace_id) || return 1
-  FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" parent_label) || return 1
-  FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" workspace_label) || return 1
-  FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=$(fm_backend_herdr_projection_journal_field "$journal" task_label) || return 1
+  # Its per-field grep read a field with an encoding error in a UTF-8 locale
+  # as empty, which refused the journal. Refuse any consumed field that is not
+  # printable ASCII or valid UTF-8, in every locale: LC_ALL=C makes grep match
+  # bytes, and -vx finds a field that the byte pattern does not cover whole.
+  # Only status 1 (no such field) accepts; a grep error also refuses.
+  utf8_text=$'([ -~]|[\xc2-\xdf][\x80-\xbf]|\xe0[\xa0-\xbf][\x80-\xbf]|[\xe1-\xec\xee\xef][\x80-\xbf][\x80-\xbf]|\xed[\x80-\x9f][\x80-\xbf]|\xf0[\x90-\xbf][\x80-\xbf][\x80-\xbf]|[\xf1-\xf3][\x80-\xbf][\x80-\xbf][\x80-\xbf]|\xf4[\x80-\x8f][\x80-\xbf][\x80-\xbf])*'
+  status=0
+  LC_ALL=C grep -a -v -x -E -q -e "$utf8_text" <<< "$checked" 2>/dev/null || status=$?
+  [ "$status" = 1 ] || return 1
+  [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ] || return 0
+  FM_BACKEND_HERDR_JOURNAL_HOME=${values[3]:-}
+  FM_BACKEND_HERDR_JOURNAL_SESSION=${values[4]:-}
+  FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID=${values[5]:-}
+  FM_BACKEND_HERDR_JOURNAL_TAB_ID=${values[6]:-}
+  FM_BACKEND_HERDR_JOURNAL_PANE_ID=${values[7]:-}
+  FM_BACKEND_HERDR_JOURNAL_PARENT_WORKSPACE_ID=${values[8]:-}
+  FM_BACKEND_HERDR_JOURNAL_PARENT_LABEL=${values[9]:-}
+  FM_BACKEND_HERDR_JOURNAL_WORKSPACE_LABEL=${values[10]:-}
+  FM_BACKEND_HERDR_JOURNAL_TASK_LABEL=${values[11]:-}
   case "$FM_BACKEND_HERDR_JOURNAL_HOME" in
     /*) ;;
     *) return 1 ;;

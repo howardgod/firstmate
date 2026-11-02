@@ -62,12 +62,13 @@ fm_herdr_cleanup_home_identity() {
   (cd "$FM_HOME" 2>/dev/null && pwd -P)
 }
 
-fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
-  local title=$1 session=$2 home_real=$3 journal id expected journal_home
+fm_herdr_cleanup_journal_index() { # <session> <home-real>
+  local session=$1 home_real=$2 journal id expected journal_home
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 1
   for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
     [ -f "$journal" ] && [ ! -L "$journal" ] || continue
-    id=$(basename "$journal" "$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX")
+    id=${journal##*/}
+    id=${id%"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"}
     fm_task_id_creation_valid "$id" || continue
     fm_backend_herdr_projection_journal_snapshot "$journal" "$id" || continue
     if [ "$FM_BACKEND_HERDR_JOURNAL_VERSION" = 2 ]; then
@@ -78,40 +79,44 @@ fm_herdr_cleanup_journal_matches() { # <title> <session> <home-real>
     fi
     expected=$(fm_backend_herdr_projection_workspace_label \
       "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID")
-    [ "$expected" = "$title" ] || continue
-    printf '%s\t%s\t%s\n' "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID"
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$expected" "$journal" "$id" "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" \
+      "$FM_BACKEND_HERDR_JOURNAL_VERSION" "$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID" \
+      "$FM_BACKEND_HERDR_JOURNAL_TAB_ID" "$FM_BACKEND_HERDR_JOURNAL_PANE_ID"
   done
+  return 0
+}
+
+fm_herdr_cleanup_index_candidates() { # <workspace/title-tsv> <session> <home-real>
+  local candidates=$1 index
+  index=$(fm_herdr_cleanup_journal_index "$2" "$3") || return 1
+  # Index labels once for discovery. The fresh scans in unique_match remain
+  # mandatory before closure and journal retirement; this is not authority.
+  printf '%s\n\n%s\n' "$index" "$candidates" | awk -F '\t' '
+    !titles && NF == 0 { titles = 1; next }
+    !titles { count[$1]++; record[$1] = substr($0, index($0, FS) + 1); next }
+    count[$2] == 1 { print $0 FS record[$2] }
+  '
+}
+
+fm_herdr_cleanup_read_match() { # <journal/id/token/version/workspace/tab/pane-tsv>
+  IFS=$'\t' read -r FM_HERDR_CLEANUP_JOURNAL FM_HERDR_CLEANUP_ID \
+    FM_HERDR_CLEANUP_TOKEN FM_HERDR_CLEANUP_VERSION \
+    FM_HERDR_CLEANUP_BOUND_WORKSPACE FM_HERDR_CLEANUP_BOUND_TAB FM_HERDR_CLEANUP_BOUND_PANE <<< "$1"
+  [ -n "$FM_HERDR_CLEANUP_JOURNAL" ] \
+    && [ -n "$FM_HERDR_CLEANUP_ID" ] \
+    && [ -n "$FM_HERDR_CLEANUP_TOKEN" ] \
+    && [ -n "$FM_HERDR_CLEANUP_VERSION" ]
 }
 
 fm_herdr_cleanup_unique_match() { # <title> <session> <home-real>
-  local title=$1 session=$2 home_real=$3 matches count record
-  FM_HERDR_CLEANUP_JOURNAL=
-  FM_HERDR_CLEANUP_ID=
-  FM_HERDR_CLEANUP_TOKEN=
-  FM_HERDR_CLEANUP_VERSION=
-  FM_HERDR_CLEANUP_BOUND_WORKSPACE=
-  FM_HERDR_CLEANUP_BOUND_TAB=
-  FM_HERDR_CLEANUP_BOUND_PANE=
-  matches=$(fm_herdr_cleanup_journal_matches "$title" "$session" "$home_real") || return 1
-  count=$(printf '%s\n' "$matches" | awk 'NF { n++ } END { print n+0 }')
-  [ "$count" -eq 1 ] || return 1
-  record=$(printf '%s\n' "$matches" | awk 'NF { print; exit }')
-  FM_HERDR_CLEANUP_JOURNAL=${record%%$'\t'*}
-  record=${record#*$'\t'}
-  FM_HERDR_CLEANUP_ID=${record%%$'\t'*}
-  FM_HERDR_CLEANUP_TOKEN=${record#*$'\t'}
-  [ -n "$FM_HERDR_CLEANUP_JOURNAL" ] \
-    && [ -n "$FM_HERDR_CLEANUP_ID" ] \
-    && [ -n "$FM_HERDR_CLEANUP_TOKEN" ] || return 1
-  fm_backend_herdr_projection_journal_snapshot \
-    "$FM_HERDR_CLEANUP_JOURNAL" "$FM_HERDR_CLEANUP_ID" || return 1
-  [ "$FM_BACKEND_HERDR_JOURNAL_PROJECTION_ID" = "$FM_HERDR_CLEANUP_TOKEN" ] || return 1
-  FM_HERDR_CLEANUP_VERSION=$FM_BACKEND_HERDR_JOURNAL_VERSION
-  if [ "$FM_HERDR_CLEANUP_VERSION" = 2 ]; then
-    FM_HERDR_CLEANUP_BOUND_WORKSPACE=$FM_BACKEND_HERDR_JOURNAL_WORKSPACE_ID
-    FM_HERDR_CLEANUP_BOUND_TAB=$FM_BACKEND_HERDR_JOURNAL_TAB_ID
-    FM_HERDR_CLEANUP_BOUND_PANE=$FM_BACKEND_HERDR_JOURNAL_PANE_ID
-  fi
+  local title=$1 session=$2 home_real=$3 index matches
+  index=$(fm_herdr_cleanup_journal_index "$session" "$home_real") || return 1
+  matches=$(printf '%s\n' "$index" | awk -F '\t' -v title="$title" '
+    $1 == title { print substr($0, index($0, FS) + 1) }
+  ') || return 1
+  case "$matches" in ''|*$'\n'*) return 1 ;; esac
+  fm_herdr_cleanup_read_match "$matches"
 }
 
 fm_herdr_cleanup_snapshot_candidate() { # <snapshot> <workspace> <title> <token> <bound-workspace> <bound-tab> <bound-pane>
@@ -199,14 +204,12 @@ fm_herdr_cleanup_revalidate() { # <session> <workspace> <tab> <pane> <title> <to
   [ "${focus#*$'\t'}" != "$tab" ]
 }
 
-fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
+fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real> <indexed-match>
   local session=$1 workspace=$2 title=$3 home_real=$4 token journal id task_lock
   local version bound_workspace bound_tab bound_pane presentation_lock snapshot
   local tab pane state close_status=0
   token=$(fm_herdr_cleanup_title_token "$title") || return 0
-  if ! fm_herdr_cleanup_unique_match "$title" "$session" "$home_real"; then
-    return 0
-  fi
+  fm_herdr_cleanup_read_match "$5" || return 0
   journal=$FM_HERDR_CLEANUP_JOURNAL
   id=$FM_HERDR_CLEANUP_ID
   version=$FM_HERDR_CLEANUP_VERSION
@@ -293,7 +296,7 @@ fm_herdr_cleanup_one() { # <session> <workspace> <title> <home-real>
 }
 
 fm_herdr_session_cleanup() {
-  local session home_real list candidates workspace title journal found=0
+  local session home_real list candidates workspace title journal match found=0
   [ -d "$STATE" ] && [ ! -L "$STATE" ] || return 0
   for journal in "$STATE"/*"$FM_BACKEND_HERDR_PRESENTATION_JOURNAL_SUFFIX"; do
     if [ -f "$journal" ] && [ ! -L "$journal" ]; then
@@ -324,9 +327,13 @@ fm_herdr_session_cleanup() {
     fm_herdr_cleanup_warn "session '$session' workspace discovery was unreadable; preserving every candidate"
     return 0
   }
-  while IFS=$'\t' read -r workspace title; do
-    [ -n "$workspace" ] && [ -n "$title" ] || continue
-    fm_herdr_cleanup_one "$session" "$workspace" "$title" "$home_real"
+  candidates=$(fm_herdr_cleanup_index_candidates "$candidates" "$session" "$home_real") || {
+    fm_herdr_cleanup_warn 'journal discovery was unreadable; preserving every candidate'
+    return 0
+  }
+  while IFS=$'\t' read -r workspace title match; do
+    [ -n "$workspace" ] && [ -n "$title" ] && [ -n "$match" ] || continue
+    fm_herdr_cleanup_one "$session" "$workspace" "$title" "$home_real" "$match"
   done <<< "$candidates"
   return 0
 }

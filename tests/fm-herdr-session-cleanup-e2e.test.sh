@@ -119,6 +119,21 @@ done
 [ "$attempt" -lt 50 ] || fail 'restored child did not converge to the exact childless idle-shell process-group shape'
 pass 'real named lab reproduced the exact restored one-tab one-pane childless no-agent shell shape'
 
+# Both task ids produce the same concise label. An indexed collision must not
+# become destructive, and a later invocation must rebuild the index.
+{
+  printf 'version=1\ntask_id=fm-%s\nprojection_id=%s\n' "$ID" "$TOKEN"
+} > "$HOME_DIR/state/fm-$ID.herdr-presentation"
+FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
+  PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" "$ROOT/bin/fm-herdr-session-cleanup.sh" \
+  || fail 'ambiguous matching cleanup command failed'
+lab pane get "$PANE" >/dev/null || fail 'ambiguous journal index closed the restored pane'
+[ -f "$HOME_DIR/state/$ID.herdr-presentation" ] \
+  && [ -f "$HOME_DIR/state/fm-$ID.herdr-presentation" ] || fail 'ambiguous cleanup retired a journal'
+[ "$(focus_snapshot)" = "$BEFORE_FOCUS" ] || fail 'ambiguous cleanup changed exact focus'
+rm "$HOME_DIR/state/fm-$ID.herdr-presentation"
+pass 'real named lab preserves a restored pane when two journals share its label'
+
 FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
   PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" "$ROOT/bin/fm-herdr-session-cleanup.sh" \
   || fail 'session-start cleanup command failed'
@@ -132,6 +147,34 @@ if lab workspace get "$WS" >/dev/null 2>&1; then
 fi
 [ ! -e "$HOME_DIR/state/$ID.herdr-presentation" ] || fail 'matching journal survived confirmed exact pane closure'
 pass 'real named lab cleanup closes only the exact stale pane and preserves exact focus'
+
+ID=restored-v2-shell
+TOKEN=ZyXwVuTsRqPoNmLkJiHgFe
+TITLE="└ $ID · p:$TOKEN"
+CANDIDATE=$(lab workspace create --cwd "$ROOT" --label "$TITLE" --no-focus) || fail 'could not create v2 projected child fixture'
+WS=$(printf '%s' "$CANDIDATE" | jq -r '.result.workspace.workspace_id')
+TAB=$(printf '%s' "$CANDIDATE" | jq -r '.result.tab.tab_id')
+PANE=$(printf '%s' "$CANDIDATE" | jq -r '.result.root_pane.pane_id')
+{
+  printf 'version=2\ntask_id=%s\nprojection_id=%s\nhome=%s\n' "$ID" "$TOKEN" "$HOME_DIR"
+  printf 'session=%s\nworkspace_id=%s\ntab_id=%s\npane_id=%s\n' "$HERDR_LAB_SESSION" "$WS" "$TAB" "$PANE"
+  printf 'parent_workspace_id=%s\nparent_label=captain-anchor\nworkspace_label=%s\ntask_label=fm-%s\n' \
+    "$(printf '%s' "$ANCHOR" | jq -r '.result.workspace.workspace_id')" "$TITLE" "$ID"
+} > "$HOME_DIR/state/$ID.herdr-presentation"
+attempt=0
+while [ "$attempt" -lt 50 ]; do
+  if production_process_proof; then break; fi
+  sleep 0.1
+  attempt=$((attempt + 1))
+done
+[ "$attempt" -lt 50 ] || fail 'v2 child did not converge to an idle childless shell'
+FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
+  PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" "$ROOT/bin/fm-herdr-session-cleanup.sh" \
+  || fail 'v2 cleanup command failed'
+if lab pane get "$PANE" >/dev/null 2>&1; then fail 'exact v2 pane survived cleanup'; fi
+[ ! -e "$HOME_DIR/state/$ID.herdr-presentation" ] || fail 'v2 journal survived exact pane closure'
+[ "$(focus_snapshot)" = "$BEFORE_FOCUS" ] || fail 'v2 cleanup changed exact workspace/tab focus'
+pass 'real named lab indexes and closes an exact v2-bound pane without changing focus'
 
 FM_HOME="$HOME_DIR" FM_BACKEND=herdr HERDR_SESSION="$HERDR_LAB_SESSION" \
   PATH="$FAKEBIN:$HERDR_ORIGINAL_PATH" "$ROOT/bin/fm-herdr-session-cleanup.sh" \

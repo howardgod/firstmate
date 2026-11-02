@@ -1610,6 +1610,25 @@ HERDR_LAB_HELPER=bin/fm-herdr-lab.sh \
 
 Observed guarantee: one exact home-local, journal-correlated, one-tab and one-pane childless idle shell was closed after restoration while the exact non-target focus and default fleet session remained unchanged, and a repeat run was a no-op.
 
+The indexed journal-discovery path was verified on 2026-11-01 on Linux WSL2, Bash 5.2.21, and Herdr 0.9.5 protocol 22:
+
+```sh
+bash bin/fm-test-run.sh tests/fm-herdr-session-cleanup.test.sh tests/fm-herdr-session-cleanup-e2e.test.sh tests/fm-backend-herdr.test.sh
+```
+
+Observed real-lab output:
+
+```text
+ok - real named lab preserves a restored pane when two journals share its label
+ok - real named lab cleanup closes only the exact stale pane and preserves exact focus
+ok - real named lab indexes and closes an exact v2-bound pane without changing focus
+ok - real named lab cleanup is idempotent and leaves the default fleet session to the teardown tripwire
+evidence: herdr=0.9.5 protocol=22 default-session-tripwire=armed
+```
+
+The fixture-based cleanup suite additionally verified that a new duplicate journal, changed endpoint binding, or removed journal after indexing prevents closure, and a replaced journal after closure is retained.
+These race cases simulate backend responses; the real-lab cases above exercise the actual Herdr process, focus, and pane boundaries.
+
 ### Workspace-removal focus safety
 
 The focus-flash regression ran on 2026-08-05 against both Herdr 0.7.5 protocol 17 and Herdr 0.8.0 protocol 19 on macOS aarch64, with the 0.7.5 run using the pinned upstream release binary first on `PATH`:
