@@ -378,6 +378,8 @@
 #   itself a linked worktree of the project repository still launches. A pane
 #   that never reaches an isolated worktree refuses at the end of that wait,
 #   naming the last path seen and why it was rejected.
+#   That wait is FM_SPAWN_TREEHOUSE_GET_WAIT_SECS seconds (a positive integer,
+#   default 180), so a slow pool such as one reached over 9p can finish.
 #   That placement is proven only at launch. Every ship or scout therefore
 #   receives `FM_TASK_ID=<task-id>` before launch, on the same backend-specific
 #   environment channel as GOTMPDIR, and bin/fm-test-run.sh refuses to execute the
@@ -6252,10 +6254,17 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
     # misconfiguration would need machinery this path does not want - so the
     # refusal has to be self-explaining instead: carry the last path seen and the
     # reason it was rejected, and report both at the deadline.
+    treehouse_get_wait=${FM_SPAWN_TREEHOUSE_GET_WAIT_SECS:-180}
+    case $treehouse_get_wait in
+      '' | *[!0-9]* | 0*)
+        echo "error: FM_SPAWN_TREEHOUSE_GET_WAIT_SECS must be a positive integer number of seconds, got '$treehouse_get_wait'" >&2
+        exit 1
+        ;;
+    esac
     candidate=""
     last_seen=""
     last_reason="the pane reported no path"
-    for _ in $(seq 1 60); do
+    for _ in $(seq 1 "$treehouse_get_wait"); do
       p=$(spawn_current_path "$WT_TARGET" || true)
       [ -z "$p" ] || last_seen="$p"
       if [ -n "$p" ] && spawn_worktree_isolated "$p"; then
@@ -6273,7 +6282,7 @@ elif [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ]; then
       sleep 1
     done
     if [ -z "$WT" ]; then
-      echo "error: treehouse get did not enter an isolated worktree within 60s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
+      echo "error: treehouse get did not enter an isolated worktree within ${treehouse_get_wait}s (last seen '${last_seen:-none}': $last_reason; spawning project '$PROJ_ABS'); $(spawn_endpoint_hint)" >&2
       exit 1
     fi
 
