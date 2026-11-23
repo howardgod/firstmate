@@ -308,15 +308,37 @@ test_moved_branch_without_named_head_is_refused() {
   pass "a moved remote branch that lacks the named head is refused"
 }
 
-test_no_mistakes_prevalidation_done_is_not_gated() {
-  local repo wt
+# A no-mistakes worker starts its own pipeline run, so a done that hands back a
+# commit before that run is not done. The head is pushed here, so only the
+# missing ready report can explain a refusal.
+test_no_mistakes_done_without_ready_report_is_refused() {
+  local repo wt sha line mode reason rc
   repo="$TMP_ROOT/preval-repo"
   wt="$TMP_ROOT/preval-wt"
   fm_git_worktree "$repo" "$wt" fm/preval
-  git -C "$wt" commit -q --allow-empty -m 'only in the disposable copy'
-  accept_done ship no-mistakes "$wt" "$repo" 'done: implementation complete' \
-    || fail "no-mistakes pre-validation done: must not require named-head reachability"
-  pass "no-mistakes pre-validation done: is not gated"
+  git -C "$wt" commit -q --allow-empty -m 'work committed before validation'
+  sha=$(git -C "$wt" rev-parse HEAD)
+  git -C "$wt" update-ref refs/remotes/origin/fm/preval "$sha"
+  for mode in no-mistakes ''; do
+    for line in \
+      "done [at=1795400000]: committed ${sha:0:8} on fm/preval: header stays pinned on scroll; local e2e 12/12 pass; ready for /no-mistakes" \
+      'done: implementation complete' \
+      'done: local checks green' \
+      'done: PR https://example.test/o/r/pull/3'; do
+      rc=0
+      reason=$(accept_done ship "$mode" "$wt" "$repo" "$line") || rc=$?
+      [ "$rc" -eq 1 ] || fail "no-mistakes done without a ready report was accepted (mode '$mode'): $line"
+      case "$reason" in
+        *"run /no-mistakes"*) ;;
+        *) fail "the refusal did not name the next step (mode '$mode'): $reason" ;;
+      esac
+    done
+  done
+  accept_done ship no-mistakes "$wt" "$repo" 'done [at=1795400000]: PR https://example.test/o/r/pull/3 checks green' \
+    || fail "the no-mistakes ready report was refused"
+  accept_done ship direct-PR "$wt" "$repo" "done [at=1795400000]: committed ${sha:0:8} on fm/preval" \
+    || fail "a pushed direct-PR done was refused for naming no PR"
+  pass "no-mistakes done: without its ready report is refused and names /no-mistakes; the ready report and direct-PR are unchanged"
 }
 
 test_local_only_linked_branch_is_accepted() {
@@ -675,7 +697,7 @@ EOF
 
 test_scout_done_is_not_gated
 test_unpushed_ship_done_is_refused
-test_no_mistakes_prevalidation_done_is_not_gated
+test_no_mistakes_done_without_ready_report_is_refused
 test_remote_containing_named_head_is_accepted
 test_gate_mirror_only_named_head_is_refused
 test_head_pushed_from_gate_clone_is_accepted_after_refresh
