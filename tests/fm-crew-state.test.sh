@@ -2514,7 +2514,7 @@ test_other_branch_run_ignored() {
   make_repo_on_branch "$d/wt" fm/feat-g
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/feat-g.meta" "window=fm:fm-feat-g" "worktree=$d/wt" "kind=ship" "harness=claude"
-  printf 'done: implemented, ready to validate\n' > "$d/state/feat-g.status"
+  printf 'blocked: waiting on a credential\n' > "$d/state/feat-g.status"
   FM_FAKE_AXI_STATUS="$(run_running fm/some-other)"
   FM_FAKE_RUNS_LIST="$(cat <<'EOF'
   running    fm/some-other aaaaaaa  2026-07-02 22:10
@@ -2525,7 +2525,7 @@ EOF
   local out; out=$(run_crew_state "$d" feat-g)
   assert_not_contains "$out" "source: run-step" "another branch's run not misattributed"
   assert_contains "$out" "source: status-log" "no own run -> falls back to status-log"
-  assert_contains "$out" "state: done" "falls back to the log verb"
+  assert_contains "$out" "state: blocked" "falls back to the log verb"
   pass "another branch's run is ignored, falls back"
 }
 
@@ -2587,25 +2587,38 @@ test_merged_pr_reads_done_under_captured_meta() {
   pass "recorded merged PR reads done under the fleet snapshot's captured meta"
 }
 
-test_no_mistakes_prevalidation_done_stays_done() {
+# A no-mistakes worker that commits and stops with a done before running the
+# pipeline has not delivered: the only no-mistakes done is the ready report.
+# The head is pushed, so only the missing ready report can block it.
+test_no_mistakes_done_before_validation_is_blocked() {
   reset_fakes
-  local d out
+  local d sha out
   d=$(new_case preval-done)
   make_repo_on_branch "$d/wt" fm/preval
-  git -C "$d/wt" commit -q --allow-empty -m 'fix only in the worktree'
+  git -C "$d/wt" commit -q --allow-empty -m 'work committed before validation'
+  sha=$(git -C "$d/wt" rev-parse HEAD)
+  git -C "$d/wt" update-ref refs/remotes/origin/fm/preval "$sha"
   make_fakebin "$d" >/dev/null
   fm_write_meta "$d/state/preval.meta" \
     "window=fm:fm-preval" "worktree=$d/wt" "project=$d/wt" \
     "kind=ship" "mode=no-mistakes" "harness=claude"
-  printf 'done: implementation complete\n' > "$d/state/preval.status"
+  printf 'done [at=1795400000]: committed %s on fm/preval: header stays pinned on scroll; local e2e 12/12 pass; ready for /no-mistakes\n' \
+    "${sha:0:8}" > "$d/state/preval.status"
   FM_FAKE_AXI_STATUS=""
   FM_FAKE_RUNS_LIST=""
   FM_FAKE_BUSY=0
   arm_idle_record "$d/state" preval
   out=$(run_crew_state "$d" preval)
-  assert_contains "$out" "state: done" "no-mistakes pre-validation done: remains done"
-  assert_not_contains "$out" "state: blocked" "pre-validation done: must not be the named-head gate"
-  pass "no-mistakes pre-validation done: stays current-state done"
+  assert_contains "$out" "state: blocked" "a no-mistakes done before validation must not read done"
+  assert_contains "$out" "source: status-log" "the refusal stays status-log sourced"
+  assert_contains "$out" "run /no-mistakes" "the refusal must name the step the worker skipped"
+  assert_not_contains "$out" "state: done" "a no-mistakes done before validation must not remain done"
+
+  printf 'done [at=1795400100]: PR https://example.test/o/r/pull/9 checks green\n' >> "$d/state/preval.status"
+  out=$(run_crew_state "$d" preval)
+  assert_contains "$out" "state: done" "the no-mistakes ready report on a pushed head must read done"
+  assert_not_contains "$out" "state: blocked" "the ready report must pass the gate"
+  pass "no-mistakes done: before validation is current-state blocked; its ready report reads done"
 }
 
 test_moved_remote_branch_without_named_head_is_blocked() {
@@ -3141,7 +3154,9 @@ test_single_owner_terminal_declaration_supersedes_stale_decision() {
   make_fakebin "$d" >/dev/null
   arm_idle_record "$d/state" task
   for kind in scout ship; do
-    fm_write_meta "$d/state/task.meta" "window=fm:fm-task" "worktree=$d/wt" "kind=$kind" "harness=claude"
+    # The ship is direct-PR, whose done names no pipeline report, so the
+    # superseding done passes the gate on its pushed head alone.
+    fm_write_meta "$d/state/task.meta" "window=fm:fm-task" "worktree=$d/wt" "kind=$kind" "mode=direct-PR" "harness=claude"
     for opener in needs-decision blocked; do
       for terminal in 'done' failed; do
         printf '%s [key=choice]: an earlier decision\n%s: final outcome\nContinuation prose.\n\n' \
@@ -6826,7 +6841,7 @@ test_coarse_run_does_not_probe_other_branch_ci_log_for_ready_status
 test_other_branch_run_ignored
 test_unpushed_ship_done_is_blocked
 test_merged_pr_reads_done_under_captured_meta
-test_no_mistakes_prevalidation_done_stays_done
+test_no_mistakes_done_before_validation_is_blocked
 test_moved_remote_branch_without_named_head_is_blocked
 test_external_review_done_reads_ready
 test_no_run_busy_pane
