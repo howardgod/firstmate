@@ -306,6 +306,26 @@ test_unpushed_ci_ready_done_is_not_published() {
   pass "unpushed CI-ready ship done: is not published upstream"
 }
 
+# A no-mistakes child that commits and stops with a done before running the
+# pipeline has shipped nothing, so the parent hears nothing until its ready
+# report lands. Its head is pushed, so only the missing report withholds it.
+test_no_mistakes_done_before_validation_is_not_published() {
+  local key
+  make_world preval-done; bind_secondmate local
+  write_child "$MATE" child 'done [at=1795400000]: committed 1a2b3c4d on fm/child: header stays pinned on scroll; local e2e 12/12 pass; ready for /no-mistakes'
+  grep -v '^pr=\|^pr_head=' "$MATE/state/child.meta" > "$MATE/state/child.meta.tmp"
+  mv "$MATE/state/child.meta.tmp" "$MATE/state/child.meta"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  [ ! -s "$MAIN/state/mate.status" ] || fail "a no-mistakes done before validation was published upstream: $(cat "$MAIN/state/mate.status")"
+  [ "$(outcome_count "$MATE" reported)" = 0 ] || fail "a no-mistakes done before validation left a delivery receipt"
+  printf 'done [at=1795400100]: PR https://example.test/owner/repo/pull/1 checks green\n' >> "$MATE/state/child.status"
+  FM_FAKE_CREW_STATE='unknown' run_reconcile "$MATE"
+  key=$(reported_outcome_key "$MATE" child 'done') || fail "the ready report was not delivered once it landed"
+  sed -E 's/ \[at=[0-9]+\]//' "$MAIN/state/mate.status" | grep -Fq "done [key=$key]: child child done: PR https://example.test/owner/repo/pull/1 checks green" \
+    || fail "the parent did not receive the ready report: $(cat "$MAIN/state/mate.status")"
+  pass "a no-mistakes done before validation is not published upstream; its ready report is"
+}
+
 # Local readiness is recorded by the real ledger pass while it owns metadata.
 test_local_done_head_is_pinned_before_parent_delivery() {
   local project worker sha
@@ -1495,6 +1515,7 @@ test_idle_agent_with_rewritten_meta_keeps_terminal_outcome
 test_dead_agent_keeps_terminal_outcome
 test_branch_ack_retires_inactive_outcome_receipt
 test_unpushed_ci_ready_done_is_not_published
+test_no_mistakes_done_before_validation_is_not_published
 test_local_done_head_is_pinned_before_parent_delivery
 test_delivered_ledger_done_skips_git_gate
 test_local_secondmate_delivers_terminal_ledger_line
