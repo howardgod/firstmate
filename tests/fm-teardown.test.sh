@@ -4779,9 +4779,185 @@ land_shippable_commit() {
   git -C "$case_dir/project" fetch -q origin
 }
 
+# The primary clone keeps the task branch after the worktree has detached, which
+# is how a squash merge leaves fm/<task> behind. Teardown may delete that one
+# branch only when the forge says the PR is merged and the tip is the PR head.
+record_task_branch() {
+  local case_dir=$1
+  printf '%s\n' 'branch=fm/task-x1' >> "$case_dir/state/task-x1.meta"
+}
+
+test_primary_clone_deletes_branch_when_tip_is_pr_head() {
+  local case_dir rc tip
+  case_dir=$(make_case primary-delete-match)
+  write_meta "$case_dir" no-mistakes ship
+  record_task_branch "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  tip=$(git -C "$case_dir/wt" rev-parse HEAD)
+  if git -C "$case_dir/project" merge-base --is-ancestor "$tip" main; then
+    fail "primary-delete-match: setup bug, the branch tip is already an ancestor of main"
+  fi
+  # The remote-tracking ref is a copy of the same commit. It is not what
+  # authorizes the delete; the forge head does, and this shows they agree.
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin fm/task-x1
+  git -C "$case_dir/wt" checkout -q --detach "$tip"
+  git -C "$case_dir/project" branch fm/unrelated "$tip"
+  append_pr_meta_url "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$tip"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "primary-delete-match: teardown should succeed"
+  if git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1; then
+    fail "primary-delete-match: merged branch whose tip is the PR head was kept"
+  fi
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/unrelated \
+    || fail "primary-delete-match: deleted a branch that was not the task's"
+  grep -F 'deleted fm/task-x1 (PR merged; local tip matches the PR head)' "$case_dir/stdout" >/dev/null \
+    || fail "primary-delete-match: teardown did not say it deleted the branch"
+  pass "primary clone drops the task branch when its tip is the merged PR head, and no other branch"
+}
+
+test_primary_clone_keeps_branch_when_tip_is_not_pr_head() {
+  local case_dir rc local_head pr_head
+  case_dir=$(make_case primary-keep-tip)
+  write_meta "$case_dir" no-mistakes ship
+  record_task_branch "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  local_head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin fm/task-x1
+  pr_head=$(commit_tree_from_wt_head "$case_dir" "$local_head" "pipeline follow-up")
+  # HEAD is the PR head, so the landed check passes. The branch ref is still
+  # the parent, and it matches origin/fm/task-x1. Neither ancestry nor the
+  # remote-tracking ref may delete it.
+  git -C "$case_dir/wt" checkout -q --detach "$pr_head"
+  append_pr_meta_url "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$pr_head"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "primary-keep-tip: teardown should succeed"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$local_head" ] \
+    || fail "primary-keep-tip: branch whose tip is not the PR head was deleted or moved"
+  if grep -F 'deleted fm/task-x1' "$case_dir/stdout" >/dev/null; then
+    fail "primary-keep-tip: teardown reported a delete"
+  fi
+  pass "primary clone keeps a branch whose tip is not the PR head, even when the remote-tracking ref matches it"
+}
+
+test_primary_clone_keeps_branch_checked_out_in_a_worktree() {
+  local case_dir rc tip
+  case_dir=$(make_case primary-keep-checked-out)
+  write_meta "$case_dir" no-mistakes ship
+  record_task_branch "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  tip=$(git -C "$case_dir/wt" rev-parse HEAD)
+  git -C "$case_dir/wt" checkout -q --detach "$tip"
+  git -C "$case_dir/project" worktree add -q "$case_dir/other" fm/task-x1
+  append_pr_meta_url "$case_dir"
+  add_gh_pr_merged_for_head "$case_dir" "$tip"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "primary-keep-checked-out: teardown should succeed"
+  [ "$(git -C "$case_dir/project" rev-parse refs/heads/fm/task-x1)" = "$tip" ] \
+    || fail "primary-keep-checked-out: deleted a branch another worktree has checked out"
+  [ "$(git -C "$case_dir/other" rev-parse --abbrev-ref HEAD)" = fm/task-x1 ] \
+    || fail "primary-keep-checked-out: the other worktree lost the branch"
+  pass "primary clone keeps a merged branch that is checked out in a worktree"
+}
+
+test_primary_clone_keeps_branch_when_pr_state_cannot_be_read() {
+  local case_dir rc
+  case_dir=$(make_case primary-keep-unreadable)
+  write_meta "$case_dir" no-mistakes ship
+  record_task_branch "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  git -C "$case_dir/wt" checkout -q --detach
+  append_pr_meta_url "$case_dir"
+  add_gh_axi_error "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "primary-keep-unreadable: landed content should still tear down"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "primary-keep-unreadable: deleted the branch when the PR state could not be read"
+  grep -F 'keeping fm/task-x1: PR state could not be read' "$case_dir/stdout" >/dev/null \
+    || fail "primary-keep-unreadable: teardown did not say the PR state could not be read"
+  pass "primary clone keeps the branch and says so when the PR state cannot be read"
+}
+
+test_primary_clone_keeps_branch_when_pr_is_open() {
+  local case_dir rc tip
+  case_dir=$(make_case primary-keep-open)
+  write_meta "$case_dir" no-mistakes ship
+  record_task_branch "$case_dir"
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  tip=$(git -C "$case_dir/wt" rev-parse HEAD)
+  land_on_origin_main "$case_dir" feature.txt hello
+  git -C "$case_dir/wt" checkout -q --detach
+  append_pr_meta_url "$case_dir"
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    printf '%s\t%s\t%s\n' 'OPEN' '$tip' 'https://github.com/example/repo/pull/7'
+    exit 0 ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "primary-keep-open: an open pull request should refuse teardown"$'\n'"$(cat "$case_dir/stderr")"
+  grep -q REFUSED "$case_dir/stderr" || fail "primary-keep-open: no REFUSED line in stderr"
+  grep -qF 'https://github.com/example/repo/pull/7' "$case_dir/stderr" \
+    || fail "primary-keep-open: refusal did not name the pull request URL"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "primary-keep-open: the refusal deleted the branch"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "primary-keep-open: the refusal erased the task record"
+
+  set +e
+  run_teardown "$case_dir" --abandon-pr > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "primary-keep-open: --abandon-pr should still tear down landed content"$'\n'"$(cat "$case_dir/stderr")"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "primary-keep-open: deleted the branch while its PR is open"
+  if grep -F 'deleted fm/task-x1' "$case_dir/stdout" >/dev/null; then
+    fail "primary-keep-open: teardown reported a delete"
+  fi
+  if grep -F 'could not be read' "$case_dir/stdout" >/dev/null; then
+    fail "primary-keep-open: an open PR was treated as unreadable"
+  fi
+  pass "an open pull request refuses teardown, and --abandon-pr still keeps the branch"
+}
+
 # Cleanup keeps the task's no-mistakes pipeline spend in this home's records
 # (bin/fm-pipeline-spend.sh) while the task branch that attributes its runs and
-# the task record still exist, then removes both as before.
+# the task record still exist, then removes the record. The branch stays: this
+# teardown has no merged PR, and a squash-safe delete refuses on that alone.
 test_teardown_records_the_task_pipeline_spend() {
   local case_dir rc=0 ledger
   case_dir=$(make_case pipeline-spend)
@@ -4828,9 +5004,9 @@ PY
     and .total.input_tokens == {"total": 7, "unknown": 1}
   ' "$ledger" >/dev/null || fail "pipeline-spend: the recorded spend is wrong: $(cat "$ledger")"
   assert_absent "$case_dir/state/task-x1.meta" "pipeline-spend: teardown kept the task record"
-  ! git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
-    || fail "pipeline-spend: teardown kept the task branch"
-  pass "teardown records the task's pipeline spend before removing its branch and record"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "pipeline-spend: teardown deleted the task branch without a merged PR"
+  pass "teardown records the task's pipeline spend before removing the task record"
 }
 
 test_teardown_skips_pipeline_spend_when_disabled() {
@@ -6860,3 +7036,8 @@ test_process_spawned_during_grace_is_reaped_on_later_pass
 test_persistent_scan_refuses_after_bounded_retries
 test_process_exit_during_identity_lookup_does_not_refuse
 test_run_abort_precedes_process_reap_precedes_worktree_removal
+test_primary_clone_deletes_branch_when_tip_is_pr_head
+test_primary_clone_keeps_branch_when_tip_is_not_pr_head
+test_primary_clone_keeps_branch_checked_out_in_a_worktree
+test_primary_clone_keeps_branch_when_pr_state_cannot_be_read
+test_primary_clone_keeps_branch_when_pr_is_open

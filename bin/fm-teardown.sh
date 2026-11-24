@@ -85,6 +85,14 @@
 # still proceed when the forge is absent. --abandon-pr skips only the open
 # refusal; --force does not. A pr= value that does not parse as one of those
 # URLs is not this gate's.
+# The task's own branch in the primary clone (meta branch=, or the branch the
+# worktree was on when that is unset) is deleted only when the forge says that
+# PR is merged and the local tip equals the PR head commit. A remote-tracking
+# ref counts only as another name for that same commit, so the tip must still
+# equal the forge head; git ancestry is not a signal, because a squash merge
+# never makes the branch an ancestor of the default branch. A branch checked
+# out in any worktree stays. Anything else stays, and an unreadable PR state
+# is said in teardown output. No other branch is deleted by this pass.
 # A merge-tree option or execution error reports the content-landed proof as
 # unavailable. The merge-tree --write-tree proof requires Git 2.38 or newer.
 # Uncommitted changes are never landed. Before return, the dirty check explicitly
@@ -1333,6 +1341,9 @@ ORCA_PATH_MATCH_VERIFIED=0
 CLEANUP_RECOVERY=$TEARDOWN_CLEANUP_RECOVERY
 
 KIND=$TEARDOWN_META_KIND
+# The branch the worktree was on before teardown detached it, used when meta
+# records no branch=. Empty when the worktree was already detached or absent.
+TASK_BRANCH_AT_CLEANUP=
 TEARDOWN_POOL_SLOT_LOST=0
 EXPECTED_TREEHOUSE_PROJECT_LOCK=
 if [ "$KIND" != secondmate ] && [ "$BACKEND" != orca ] \
@@ -1766,41 +1777,72 @@ gitlab_mr_landing_opted_in() {
   [ -e "$CONFIG/park-on-review" ] || [ -e "$CONFIG/auto-land" ]
 }
 
-pr_is_merged() {
-  local branch=$1 target view state remainder head resolved_url current landed=0
+# Ask the forge about $branch's PR from $repo. Sets PR_READ_MERGED
+# (true|false), PR_READ_HEAD, and PR_READ_URL when the forge answers.
+# Returns 0 on an answer, 1 when no PR matches, and 2 when the state or the
+# head commit could not be read. Callers that only need a merged proof treat
+# both failures as not merged.
+read_pr_state() {
+  local repo=$1 branch=$2 target view state remainder head resolved_url rc
+  PR_READ_MERGED=
+  PR_READ_HEAD=
+  PR_READ_URL=
   if [ -n "$PR_URL" ]; then
     target=$PR_URL
   else
-    target=$(fm_pr_number_from_branch "$WT" "$branch") || return 1
+    if target=$(fm_pr_number_from_branch "$repo" "$branch"); then
+      rc=0
+    else
+      rc=$?
+    fi
+    [ "$rc" -eq 0 ] || return "$rc"
   fi
   [ -n "$target" ] || return 1
   if fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = forgejo ]; then
-    fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
-    [ "$FM_PR_RECORD_MERGED" = true ] || return 1
+    fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 2
+    case "$FM_PR_RECORD_MERGED" in
+      true|false) ;;
+      *) return 2 ;;
+    esac
     head=$FM_PR_RECORD_HEAD
-    fm_pr_head_valid "$head" || return 1
+    fm_pr_head_valid "$head" || return 2
     resolved_url=$FM_PR_URL
+    PR_READ_MERGED=$FM_PR_RECORD_MERGED
   elif gitlab_mr_landing_opted_in && fm_pr_url_parse "$target" && [ "$FM_PR_PROVIDER" = gitlab ]; then
-    fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
-    [ "$FM_PR_RECORD_MERGED" = true ] || return 1
+    fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 2
+    case "$FM_PR_RECORD_MERGED" in
+      true|false) ;;
+      *) return 2 ;;
+    esac
     head=$FM_PR_RECORD_HEAD
-    fm_pr_head_valid "$head" || return 1
+    fm_pr_head_valid "$head" || return 2
     resolved_url=$FM_PR_URL
+    PR_READ_MERGED=$FM_PR_RECORD_MERGED
   else
-    view=$(cd "$WT" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+    view=$(cd "$repo" && gh pr view "$target" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 2
     state=${view%%$'\t'*}
     remainder=${view#*$'\t'}
-    [ "$state" != "$view" ] || return 1
+    [ "$state" != "$view" ] || return 2
     head=${remainder%%$'\t'*}
     resolved_url=${remainder#*$'\t'}
-    [ "$head" != "$remainder" ] || return 1
+    [ "$head" != "$remainder" ] || return 2
+    fm_pr_head_valid "$head" || return 2
     case "$state" in
-      MERGED|merged) ;;
-      *) return 1 ;;
+      MERGED|merged) PR_READ_MERGED=true ;;
+      *) PR_READ_MERGED=false ;;
     esac
   fi
-  [ -n "$head" ] || return 1
-  ensure_commit_object "$target" "$head" || return 1
+  PR_READ_HEAD=$head
+  PR_READ_URL=$resolved_url
+  return 0
+}
+
+pr_is_merged() {
+  local branch=$1 head current landed=0
+  read_pr_state "$WT" "$branch" || return 1
+  [ "$PR_READ_MERGED" = true ] || return 1
+  head=$PR_READ_HEAD
+  ensure_commit_object "${PR_URL:-$PR_READ_URL}" "$head" || return 1
   current=$(git -C "$WT" rev-parse --verify HEAD 2>/dev/null) || return 1
   if git -C "$WT" merge-base --is-ancestor "$current" "$head" 2>/dev/null; then
     landed=1
@@ -1809,8 +1851,8 @@ pr_is_merged() {
   fi
   [ "$landed" = 1 ] || return 1
   if [ -z "$PR_URL" ]; then
-    [ -n "$resolved_url" ] || return 1
-    PR_URL=$resolved_url
+    [ -n "$PR_READ_URL" ] || return 1
+    PR_URL=$PR_READ_URL
   fi
   return 0
 }
@@ -1925,6 +1967,66 @@ work_is_landed() {
   local branch=$1
   pr_is_merged "$branch" && return 0
   content_in_default
+}
+
+# Detach the worktree from its branch so a later delete can run, and remember
+# that name for when meta records none. A failed detach leaves the branch
+# checked out; the delete pass then skips it.
+release_worktree_branch() {
+  local branch
+  [ -d "$WT" ] || return 0
+  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
+  [ "$branch" != "HEAD" ] || return 0
+  [ -n "$branch" ] || return 0
+  TASK_BRANCH_AT_CLEANUP=$branch
+  git -C "$WT" checkout --detach -q 2>/dev/null || true
+}
+
+# Delete this task's branch in the primary clone. The script header owns the
+# rule: merged PR, tip equal to the forge head, not checked out anywhere.
+delete_landed_task_branch() {
+  local branch tip head def rc
+  [ "$KIND" != secondmate ] || return 0
+  [ -n "${PROJ:-}" ] && [ -d "$PROJ" ] || return 0
+  branch=$(fm_meta_get "$META" branch)
+  [ -n "$branch" ] || branch=${TASK_BRANCH_AT_CLEANUP:-}
+  [ -n "$branch" ] || return 0
+  git check-ref-format --branch "$branch" >/dev/null 2>&1 || return 0
+  def=$(default_branch 2>/dev/null || true)
+  [ -z "$def" ] || [ "$branch" != "$def" ] || return 0
+  git -C "$PROJ" show-ref --verify --quiet "refs/heads/$branch" || return 0
+  if git -C "$PROJ" worktree list --porcelain 2>/dev/null \
+      | sed -n 's#^branch refs/heads/##p' \
+      | grep -Fxq -- "$branch"; then
+    return 0
+  fi
+  if read_pr_state "$PROJ" "$branch"; then
+    rc=0
+  else
+    rc=$?
+  fi
+  case "$rc" in
+    0) ;;
+    1) return 0 ;;
+    *)
+      echo "keeping $branch: PR state could not be read"
+      return 0
+      ;;
+  esac
+  [ "$PR_READ_MERGED" = true ] || return 0
+  head=$PR_READ_HEAD
+  # A remote-tracking ref is a copy of the PR head only when it points at that
+  # same commit, so the local tip has to equal the forge head. Matching the
+  # upstream alone, or being an ancestor of the default branch, is not enough:
+  # a squash merge leaves the branch tip off the default branch while the tip
+  # itself is still the PR head.
+  tip=$(git -C "$PROJ" rev-parse --verify "refs/heads/$branch^{commit}" 2>/dev/null) || return 0
+  [ "$tip" = "$head" ] || return 0
+  if git -C "$PROJ" branch -D -- "$branch" >/dev/null 2>&1; then
+    echo "deleted $branch (PR merged; local tip matches the PR head)"
+  else
+    echo "keeping $branch: could not delete it" >&2
+  fi
 }
 
 # The completion links this teardown already holds locally. A retained scout
@@ -4151,19 +4253,15 @@ if [ "$BACKEND" = t3code ]; then
     endpoint_close_refusal "$ID" t3code "$T" 0 || exit 1
   }
 fi
-# Best-effort: drop the local task branch so the shared repo does not accumulate refs.
+# Release the branch this worktree is on. Deleting it is delete_landed_task_branch,
+# after the worktree is no longer holding it, and only under the PR-head rule.
 if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
   if [ "$ORCA_PATH_MATCH_VERIFIED" != 1 ]; then
     require_orca_worktree_path_match_if_present "$ORCA_WORKTREE_ID" "$WT" || exit 1
     ORCA_PATH_MATCH_VERIFIED=1
   fi
   if [ -d "$WT" ]; then
-    branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-    if [ "$branch" != "HEAD" ]; then
-      if git -C "$WT" checkout --detach -q 2>/dev/null; then
-        git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-      fi
-    fi
+    release_worktree_branch
     rm -f "$WT/.claude/settings.local.json" "$WT/.opencode/plugins/fm-turn-end.js" \
       "$WT/.opencode/plugins/fm-busy-state.js" \
       "$WT/.fm-grok-turnend" "$WT/.fm-kimi-turnend"
@@ -4177,12 +4275,7 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != secondmate ]; then
 elif [ "$KIND" != secondmate ] && ! teardown_owns_worktree; then
   :
 elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
-  branch=$(git -C "$WT" rev-parse --abbrev-ref HEAD 2>/dev/null || echo HEAD)
-  if [ "$branch" != "HEAD" ]; then
-    if git -C "$WT" checkout --detach -q 2>/dev/null; then
-      git -C "$WT" branch -D "$branch" >/dev/null 2>&1 || true
-    fi
-  fi
+  release_worktree_branch
   # Remove our hook and environment files so a reused pool worktree cannot fire
   # signals for a dead task or hand a t3code env block or channel statement to
   # its next holder.
@@ -4217,6 +4310,10 @@ elif [ -d "$WT" ] && [ "$KIND" != secondmate ]; then
   # whenever the return did not actually happen.
   fm_treehouse_slot_owner_release "$WT" "$ID"
 fi
+
+# After this worktree has released the branch (or left it checked out, in
+# which case the pass skips). Fleet sync below must not be what decides.
+delete_landed_task_branch
 
 if [ "$BACKEND" = rex ] && [ "$KIND" = secondmate ] && [ "$TEARDOWN_WINDOWLESS" != 1 ]; then
   ( unset FM_ROOT_OVERRIDE; FM_HOME="$HOME_PATH" FM_ROOT="$HOME_PATH" STATE="$HOME_PATH/state" \
