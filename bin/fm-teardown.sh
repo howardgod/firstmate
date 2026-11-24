@@ -72,6 +72,19 @@
 # by itself causes a false refusal of landed work.
 # A gh lookup error falls back to the content check; if that is also inconclusive,
 # teardown refuses rather than risk discarding unlanded work.
+# A ship whose meta records a pull-request or change URL this script can parse
+# is a separate gate from that proof. The gate reads the recorded URL the same
+# way the merged-PR proof does: GitHub through gh, Forgejo through tea, Gerrit
+# through gerrit-axi, and a GitLab merge request through glab only when this
+# home opts into GitLab MR landing (config/park-on-review or config/auto-land).
+# Without that opt-in a GitLab URL is not read here and the landed-work rules
+# above are unchanged. An open result refuses and names the URL, even when the
+# branch is already reachable from a remote. A merged or closed result, and a
+# forge that cannot be read, leave those rules unchanged: an unread pull
+# request is not treated as open, because cleanup of already-landed work must
+# still proceed when the forge is absent. --abandon-pr skips only the open
+# refusal; --force does not. A pr= value that does not parse as one of those
+# URLs is not this gate's.
 # The task's own branch in the primary clone (meta branch=, or the branch the
 # worktree was on when that is unset) is deleted only when the forge says that
 # PR is merged and the local tip equals the PR head commit. A remote-tracking
@@ -217,11 +230,15 @@
 # leased home releases its durable treehouse lease so the pool slot is freed,
 # never left leased forever. If the treehouse return fails, teardown leaves the
 # leased home and state in place instead of hiding a still-held lease.
-# Usage: fm-teardown.sh <task-id> [--force] [--legacy-record]
+# Usage: fm-teardown.sh <task-id> [--force] [--abandon-pr] [--legacy-record]
 #   --force skips ordinary-task dirty and landed-work checks, skips scout report
 #   checks and closes the scout as discarded with no report recorded, and
 #   discards secondmate child work for kind=secondmate. Only use it when the
-#   captain has explicitly said to discard the work.
+#   captain has explicitly said to discard the work. It does not skip the
+#   open-pull-request refusal below.
+#   --abandon-pr skips only that refusal: a ship whose recorded pull request is
+#   still open may then be torn down. It does not discard unlanded work, and it
+#   is not required when the forge cannot be read.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -550,11 +567,13 @@ fi
 ID=$1
 TEARDOWN_LOST_SLOT_EXIT=4
 FORCE=
+ABANDON_PR=
 LEGACY_RECORD_GIVEN=0
 shift
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --force) FORCE=--force ;;
+    --abandon-pr) ABANDON_PR=1 ;;
     --legacy-record) LEGACY_RECORD_GIVEN=1 ;;
     *)
       echo "error: invalid teardown request" >&2
@@ -1836,6 +1855,71 @@ pr_is_merged() {
     PR_URL=$PR_READ_URL
   fi
   return 0
+}
+
+# State of the recorded pull request, as OPEN, CLOSED, or MERGED. The provider
+# and URL fields are the ones fm_pr_url_parse just set. A failed read returns
+# non-zero; the caller does not treat that as open.
+recorded_pr_state() {
+  local view state merged=
+  case "$FM_PR_PROVIDER" in
+    forgejo)
+      fm_pr_forgejo_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+      state=$FM_PR_RECORD_STATE
+      merged=$FM_PR_RECORD_MERGED
+      ;;
+    gitlab)
+      fm_pr_gitlab_read_record "$FM_PR_HOST" "$FM_PR_PATH" "$FM_PR_NUMBER" || return 1
+      state=$FM_PR_RECORD_STATE
+      merged=$FM_PR_RECORD_MERGED
+      ;;
+    gerrit)
+      fm_pr_gerrit_read_record "$FM_PR_HOST" "$FM_PR_NUMBER" || return 1
+      state=$FM_PR_RECORD_STATE
+      merged=$FM_PR_RECORD_MERGED
+      ;;
+    github)
+      [ -d "$WT" ] || return 1
+      view=$(cd "$WT" && gh pr view "$PR_URL" --json state,headRefOid,url -q '.state + "\t" + .headRefOid + "\t" + .url' 2>/dev/null) || return 1
+      state=${view%%$'\t'*}
+      [ -n "$state" ] && [ "$state" != "$view" ] || return 1
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+  if [ "$merged" = true ]; then
+    printf 'MERGED\n'
+    return 0
+  fi
+  case "$state" in
+    OPEN|open|opened|NEW) printf 'OPEN\n' ;;
+    MERGED|merged) printf 'MERGED\n' ;;
+    CLOSED|closed|ABANDONED) printf 'CLOSED\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+# Refuse a ship whose recorded pull request the forge reports as still open.
+# A failed read is not an open report: the landed-work rules below decide, so
+# an absent forge does not block cleanup of work those rules already accept.
+# --abandon-pr is the only bypass of a positive open report.
+refuse_open_recorded_pr() {
+  local state
+  [ "$KIND" = ship ] || return 0
+  [ "$ABANDON_PR" = 1 ] && return 0
+  [ -n "$PR_URL" ] || return 0
+  fm_pr_url_parse "$PR_URL" || return 0
+  if [ "$FM_PR_PROVIDER" = gitlab ] && ! gitlab_mr_landing_opted_in; then
+    return 0
+  fi
+  if ! state=$(recorded_pr_state); then
+    return 0
+  fi
+  [ "$state" = OPEN ] || return 0
+  echo "REFUSED: ship task $ID's recorded pull request is still open: $PR_URL" >&2
+  echo "Land or close it before teardown, or pass --abandon-pr to tear down while it stays open." >&2
+  return 1
 }
 
 # Is the branch's content already present in the up-to-date default branch? Fetches
@@ -3913,6 +3997,9 @@ if [ "$BACKEND" = orca ] && [ "$KIND" != scout ] && [ "$KIND" != secondmate ] &&
   require_orca_worktree_path_match "$ORCA_WORKTREE_ID" "$WT" || exit 1
   ORCA_PATH_MATCH_VERIFIED=1
 fi
+
+# Before any cleanup. --force still stops here; only --abandon-pr does not.
+refuse_open_recorded_pr || exit 1
 
 if teardown_owns_worktree && [ -d "$WT" ] && [ "$FORCE" != "--force" ]; then
   if validate_worktree_teardown_safety; then

@@ -312,6 +312,25 @@ SH
   chmod +x "$case_dir/fakebin/gh-axi" "$case_dir/fakebin/gh"
 }
 
+# Override gh so `pr view --json state,headRefOid,url` reports one state.
+# Teardown's open-PR gate and its merged-PR proof share that query.
+add_gh_pr_state() {
+  local case_dir=$1 state=$2
+  cat > "$case_dir/fakebin/gh" <<SH
+#!/usr/bin/env bash
+case "\${1:-} \${2:-}" in
+  "pr view")
+    case " \$* " in
+      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' '$state' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
+    esac
+    ;;
+esac
+echo "error: pull request not found" >&2
+exit 1
+SH
+  chmod +x "$case_dir/fakebin/gh"
+}
+
 # Squash-merged history whose pipeline rebased the branch onto a newer main that
 # edited the same shared file. A local copy left behind by that rebase holds
 # different content for the shared file, so its per-commit patch ids against the
@@ -2362,6 +2381,117 @@ test_gh_error_and_content_absent_refuses() {
   expect_code 1 "$rc" "gh-error: teardown should refuse when the PR lookup errors and content is not landed"
   grep -q REFUSED "$case_dir/stderr" || fail "gh-error: no REFUSED line in stderr"
   pass "gh lookup error with content not in default refuses (fail-safe)"
+}
+
+# Push the task branch to origin and fetch it back so HEAD is reachable from a
+# remote. That reachability is what used to count as landed while a PR stayed open.
+push_task_branch() {
+  local case_dir=$1
+  git -C "$case_dir/wt" push -q origin fm/task-x1
+  git -C "$case_dir/project" fetch -q origin
+}
+
+# A ship whose recorded pull request is still open must not be torn down just
+# because its branch is already reachable from a remote. Reachability alone is
+# what let a refused merge's teardown close the task while the PR stayed open.
+test_open_recorded_pr_refuses_when_branch_is_already_on_a_remote() {
+  local case_dir rc head url
+  url=https://github.com/example/repo/pull/7
+  case_dir=$(make_case open-pr-on-remote)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  push_task_branch "$case_dir"
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_state "$case_dir" OPEN
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "open-pr-on-remote: teardown should refuse while the recorded pull request is open"$'\n'"$(cat "$case_dir/stderr")"
+  grep -q REFUSED "$case_dir/stderr" || fail "open-pr-on-remote: no REFUSED line in stderr"
+  grep -qF "$url" "$case_dir/stderr" || fail "open-pr-on-remote: refusal did not name the pull request URL"
+  grep -qF -- '--abandon-pr' "$case_dir/stderr" || fail "open-pr-on-remote: refusal did not name --abandon-pr"
+  assert_refusal_retained_task_state "$case_dir" open-pr-on-remote "$head"
+
+  set +e
+  run_teardown "$case_dir" --force > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "open-pr-on-remote: --force should not bypass an open pull request"$'\n'"$(cat "$case_dir/stderr")"
+  grep -qF "$url" "$case_dir/stderr" || fail "open-pr-on-remote: --force refusal did not name the pull request URL"
+  assert_refusal_retained_task_state "$case_dir" open-pr-force "$head"
+
+  case_dir=$(make_case open-pr-abandon)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  push_task_branch "$case_dir"
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_state "$case_dir" OPEN
+  set +e
+  run_teardown "$case_dir" --abandon-pr > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "open-pr-abandon: --abandon-pr should tear down a pushed branch whose pull request stays open"$'\n'"$(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "open-pr-abandon: teardown printed a REFUSED line"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "open-pr-abandon: the task record survived"
+
+  case_dir=$(make_case open-pr-abandon-unpushed)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "unpushed work"
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_state "$case_dir" OPEN
+  head=$(git -C "$case_dir/wt" rev-parse HEAD)
+  set +e
+  run_teardown "$case_dir" --abandon-pr > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 1 "$rc" "open-pr-abandon-unpushed: --abandon-pr must not discard work that is not on a remote"$'\n'"$(cat "$case_dir/stderr")"
+  grep -q REFUSED "$case_dir/stderr" || fail "open-pr-abandon-unpushed: no REFUSED line in stderr"
+  ! grep -qF 'still open' "$case_dir/stderr" || fail "open-pr-abandon-unpushed: --abandon-pr still refused for an open pull request"
+  assert_refusal_retained_task_state "$case_dir" open-pr-abandon-unpushed "$head"
+
+  case_dir=$(make_case closed-pr-on-remote)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  push_task_branch "$case_dir"
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_state "$case_dir" CLOSED
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "closed-pr-on-remote: a closed unmerged pull request should keep the reachable-branch rule"$'\n'"$(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "closed-pr-on-remote: teardown printed a REFUSED line"
+
+  case_dir=$(make_case merged-pr-on-remote)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  push_task_branch "$case_dir"
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  add_gh_pr_state "$case_dir" MERGED
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "merged-pr-on-remote: a merged pull request should still tear down"$'\n'"$(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "merged-pr-on-remote: teardown printed a REFUSED line"
+
+  case_dir=$(make_case unread-pr-on-remote)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit "$case_dir" "shippable work"
+  push_task_branch "$case_dir"
+  printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
+  add_gh_axi_error "$case_dir"
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "unread-pr-on-remote: an unreachable forge should leave the reachable-branch rule unchanged"$'\n'"$(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "unread-pr-on-remote: an unread pull request was treated as open"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "unread-pr-on-remote: the task record survived"
+  pass "an open recorded pull request refuses teardown even when the branch is already on a remote"
 }
 
 # Write a meta that predates the spawn_gen field entirely. Args: case_dir mode kind
@@ -4799,7 +4929,20 @@ SH
   rc=$?
   set -e
 
-  expect_code 0 "$rc" "primary-keep-open: landed content should still tear down"
+  expect_code 1 "$rc" "primary-keep-open: an open pull request should refuse teardown"$'\n'"$(cat "$case_dir/stderr")"
+  grep -q REFUSED "$case_dir/stderr" || fail "primary-keep-open: no REFUSED line in stderr"
+  grep -qF 'https://github.com/example/repo/pull/7' "$case_dir/stderr" \
+    || fail "primary-keep-open: refusal did not name the pull request URL"
+  git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
+    || fail "primary-keep-open: the refusal deleted the branch"
+  [ -e "$case_dir/state/task-x1.meta" ] \
+    || fail "primary-keep-open: the refusal erased the task record"
+
+  set +e
+  run_teardown "$case_dir" --abandon-pr > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+  expect_code 0 "$rc" "primary-keep-open: --abandon-pr should still tear down landed content"$'\n'"$(cat "$case_dir/stderr")"
   git -C "$case_dir/project" show-ref --verify --quiet refs/heads/fm/task-x1 \
     || fail "primary-keep-open: deleted the branch while its PR is open"
   if grep -F 'deleted fm/task-x1' "$case_dir/stdout" >/dev/null; then
@@ -4808,7 +4951,7 @@ SH
   if grep -F 'could not be read' "$case_dir/stdout" >/dev/null; then
     fail "primary-keep-open: an open PR was treated as unreadable"
   fi
-  pass "primary clone keeps the branch when the PR is open"
+  pass "an open pull request refuses teardown, and --abandon-pr still keeps the branch"
 }
 
 # Cleanup keeps the task's no-mistakes pipeline spend in this home's records
@@ -6834,6 +6977,7 @@ test_forced_secondmate_dirty_child_return_warns_and_completes
 test_return_that_removes_copy_warns_cannot_verify
 test_scout_ignored_files_survive_scratch_clean
 test_gh_error_and_content_absent_refuses
+test_open_recorded_pr_refuses_when_branch_is_already_on_a_remote
 test_legacy_record_without_the_flag_refuses
 test_windowless_legacy_record_with_gone_worktree_tears_down
 test_windowless_legacy_record_tears_down_with_the_legacy_flag
