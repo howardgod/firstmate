@@ -79,11 +79,12 @@
 # home opts into GitLab MR landing (config/park-on-review or config/auto-land).
 # Without that opt-in a GitLab URL is not read here and the landed-work rules
 # above are unchanged. An open result refuses and names the URL, even when the
-# branch is already reachable from a remote. A merged or closed result leaves
-# those rules unchanged. A forge read that fails refuses too, rather than
-# treating the unread pull request as closed. --abandon-pr skips only this
-# gate; --force does not. A pr= value that does not parse as one of those URLs
-# is not this gate's.
+# branch is already reachable from a remote. A merged or closed result, and a
+# forge that cannot be read, leave those rules unchanged: an unread pull
+# request is not treated as open, because cleanup of already-landed work must
+# still proceed when the forge is absent. --abandon-pr skips only the open
+# refusal; --force does not. A pr= value that does not parse as one of those
+# URLs is not this gate's.
 # A merge-tree option or execution error reports the content-landed proof as
 # unavailable. The merge-tree --write-tree proof requires Git 2.38 or newer.
 # Uncommitted changes are never landed. Before return, the dirty check explicitly
@@ -228,8 +229,8 @@
 #   captain has explicitly said to discard the work. It does not skip the
 #   open-pull-request refusal below.
 #   --abandon-pr skips only that refusal: a ship whose recorded pull request is
-#   still open, or whose forge could not be read, may then be torn down. It does
-#   not discard unlanded work.
+#   still open may then be torn down. It does not discard unlanded work, and it
+#   is not required when the forge cannot be read.
 #   --legacy-record accepts a task record that predates the spawn_gen field:
 #   teardown then proceeds only when the recorded endpoint is confirmed dead or
 #   agent-less (bin/fm-backend.sh's recovery-grade classifier), and without
@@ -1816,7 +1817,7 @@ pr_is_merged() {
 
 # State of the recorded pull request, as OPEN, CLOSED, or MERGED. The provider
 # and URL fields are the ones fm_pr_url_parse just set. A failed read returns
-# non-zero so the caller refuses instead of guessing.
+# non-zero; the caller does not treat that as open.
 recorded_pr_state() {
   local view state merged=
   case "$FM_PR_PROVIDER" in
@@ -1857,9 +1858,10 @@ recorded_pr_state() {
   esac
 }
 
-# Refuse a ship whose recorded pull request is still open, or whose forge could
-# not be read. See the script header for which URLs this covers and why an
-# unread forge refuses. --abandon-pr is the only bypass.
+# Refuse a ship whose recorded pull request the forge reports as still open.
+# A failed read is not an open report: the landed-work rules below decide, so
+# an absent forge does not block cleanup of work those rules already accept.
+# --abandon-pr is the only bypass of a positive open report.
 refuse_open_recorded_pr() {
   local state
   [ "$KIND" = ship ] || return 0
@@ -1870,9 +1872,7 @@ refuse_open_recorded_pr() {
     return 0
   fi
   if ! state=$(recorded_pr_state); then
-    echo "REFUSED: ship task $ID's recorded pull request could not be read from the forge: $PR_URL" >&2
-    echo "Teardown refuses rather than treat an unread pull request as closed. Retry when the forge answers, or pass --abandon-pr." >&2
-    return 1
+    return 0
   fi
   [ "$state" = OPEN ] || return 0
   echo "REFUSED: ship task $ID's recorded pull request is still open: $PR_URL" >&2

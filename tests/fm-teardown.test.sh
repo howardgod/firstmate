@@ -131,19 +131,10 @@ case "${1:-} ${2:-}" in
 esac
 exit 0
 SH
-  # A recorded GitHub pull request with no per-test override reads as closed,
-  # not missing. The open-PR gate refuses an unread forge, and these fixtures
-  # record a URL only as the completion link of work that is already landed.
   cat > "$fakebin/gh" <<'SH'
 #!/usr/bin/env bash
 case "${1:-} ${2:-}" in
-  "pr view")
-    case " $* " in
-      *"state,headRefOid,url"*) printf '%s\t%s\t%s\n' 'CLOSED' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'https://github.com/example/repo/pull/7' ; exit 0 ;;
-    esac
-    echo "error: pull request not found" >&2
-    exit 1
-    ;;
+  "pr view") echo "error: pull request not found" >&2 ; exit 1 ;;
 esac
 exit 0
 SH
@@ -338,33 +329,6 @@ echo "error: pull request not found" >&2
 exit 1
 SH
   chmod +x "$case_dir/fakebin/gh"
-}
-
-# A closed Forgejo pull request for the completion-link fixtures, whose recorded
-# URL is https://forgejo.example.com/example/repo/pulls/7.
-add_tea_pull_closed() {
-  local case_dir=$1
-  cat > "$case_dir/fakebin/tea" <<'SH'
-#!/usr/bin/env bash
-if [ "${1:-} ${2:-}" = "login list" ]; then
-  printf '[{"name":"fj","url":"https://forgejo.example.com"}]\n'
-  exit 0
-fi
-[ "${1:-}" = api ] || exit 1
-printf '%s\n' '{"state":"closed","merged":false,"head":{"sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}'
-SH
-  chmod +x "$case_dir/fakebin/tea"
-}
-
-# One Gerrit change status. The number is the first argument after `show`.
-add_gerrit_change_status() {
-  local case_dir=$1 status=$2
-  cat > "$case_dir/fakebin/gerrit-axi" <<SH
-#!/usr/bin/env bash
-[ "\${1:-}" = show ] || exit 1
-printf '{"ok":true,"op":"show","changes":[{"change":%s,"status":"%s","url":null}]}\n' "\${2:-0}" '$status'
-SH
-  chmod +x "$case_dir/fakebin/gerrit-axi"
 }
 
 # Squash-merged history whose pipeline rebased the branch onto a newer main that
@@ -825,7 +789,6 @@ test_teardown_closes_a_gerrit_task_with_its_change_url_as_a_note() {
   write_meta "$case_dir" no-mistakes ship
   printf 'pr=%s\n' "$gerrit_url" >> "$case_dir/state/task-x1.meta"
   seed_backlog_in_flight "$case_dir"
-  add_gerrit_change_status "$case_dir" MERGED
   # Pin the refusal tasks-axi applies to a --pr link that is not a canonical
   # GitHub pull request, so this case keeps reproducing whatever the installed
   # release accepts.
@@ -906,9 +869,6 @@ SH
     printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
     seed_backlog_in_flight "$case_dir"
     cp "$TMP_ROOT/tasks-axi-close-gitlab/fakebin/tasks-axi" "$case_dir/fakebin/tasks-axi"
-    case "$url" in
-      */pulls/*) add_tea_pull_closed "$case_dir" ;;
-    esac
     out=$(run_teardown "$case_dir" 2>&1) || fail "teardown of a landed task with $url failed: $out"
     tasks-axi show task-x1 --file "$case_dir/data/backlog.md" \
       | grep -F "links: \"pr:$url\"" >/dev/null \
@@ -2524,15 +2484,13 @@ test_open_recorded_pr_refuses_when_branch_is_already_on_a_remote() {
   push_task_branch "$case_dir"
   printf 'pr=%s\n' "$url" >> "$case_dir/state/task-x1.meta"
   add_gh_axi_error "$case_dir"
-  head=$(git -C "$case_dir/wt" rev-parse HEAD)
   set +e
   run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
   rc=$?
   set -e
-  expect_code 1 "$rc" "unread-pr-on-remote: an unreachable forge should refuse even when the branch is on a remote"$'\n'"$(cat "$case_dir/stderr")"
-  grep -qF 'could not be read' "$case_dir/stderr" || fail "unread-pr-on-remote: refusal did not say the forge could not be read"
-  grep -qF "$url" "$case_dir/stderr" || fail "unread-pr-on-remote: refusal did not name the pull request URL"
-  assert_refusal_retained_task_state "$case_dir" unread-pr-on-remote "$head"
+  expect_code 0 "$rc" "unread-pr-on-remote: an unreachable forge should leave the reachable-branch rule unchanged"$'\n'"$(cat "$case_dir/stderr")"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "unread-pr-on-remote: an unread pull request was treated as open"
+  [ ! -e "$case_dir/state/task-x1.meta" ] || fail "unread-pr-on-remote: the task record survived"
   pass "an open recorded pull request refuses teardown even when the branch is already on a remote"
 }
 
