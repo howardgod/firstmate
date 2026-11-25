@@ -314,6 +314,14 @@ test_treehouse_root_refuses_before_lease() {
   assert_equals "$line" "$(cat "$config")" "spawn changed the project config"
   pass "a project outside /mnt refuses a Windows pool before any lease or task state"
 
+  # TOML literal strings use single quotes, and Treehouse honors them too.
+  printf "root = '/mnt/c/Treehouse'\n" > "$config"
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  expect_code 1 "$status" "spawn accepted a single-quoted Windows pool"$'\n'"$out"
+  assert_contains "$out" "root = '/mnt/c/Treehouse'" "refusal did not name the single-quoted root line"
+  [ ! -s "$dir/fake/treehouse-log" ] || fail "single-quoted refusal called Treehouse"
+  pass "a single-quoted TOML root under /mnt is refused the same way"
+
   printf '# %s\n[example]\n%s\n' "$line" "$line" > "$config"
   out=$(run_lease_spawn "$dir" "$id"); status=$?
   expect_code 0 "$status" "spawn should proceed with no top-level root"$'\n'"$out"

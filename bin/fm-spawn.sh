@@ -2418,7 +2418,7 @@ spawn_guard_treehouse_root() {
   [ -f "$config" ] && [ -r "$config" ] || return 0
   root_line=$(awk '
     /^[[:blank:]]*\[/ { exit }
-    /^[[:blank:]]*root[[:blank:]]*=[[:blank:]]*"\/mnt\/[^"]*"[[:space:]]*(#.*)?$/ { print; exit }
+    /^[[:blank:]]*root[[:blank:]]*=[[:blank:]]*("\/mnt\/[^"]*"|\047\/mnt\/[^\047]*\047)[[:space:]]*(#.*)?$/ { print; exit }
   ' "$config") || return 1
   [ -n "$root_line" ] || return 0
   printf 'error: spawn refused: %s sets %s. The project is outside /mnt, but this pool is on a Windows disk, which is slow and makes Git report every file as mode-changed; remove the root line and spawn again.\n' \
