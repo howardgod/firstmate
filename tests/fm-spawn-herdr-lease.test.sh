@@ -20,7 +20,7 @@ TMP_ROOT=$(fm_test_tmproot fm-spawn-herdr-lease)
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd)
 
-# make_lease_case <name>: a home, a project, and the leased task copy.
+# make_lease_case <name> [harness] [project-dir]: a home, a project, and the leased task copy.
 # The fake herdr models the two cwd fields: `cd` sent to the pane moves the
 # restorable top-level cwd ($D/cwd) and, unless a nested shell is running,
 # the foreground cwd with it. The fake treehouse opens that nested shell for
@@ -29,7 +29,7 @@ make_lease_case() {
   local name=$1 harness=${2:-codex} dir home proj wt fb d
   dir="$TMP_ROOT/$name"
   home="$dir/home"
-  proj="$dir/project"
+  proj=${3:-$dir/project}
   wt="$dir/slot"
   d="$dir/fake"
   fb="$dir/fakebin"
@@ -37,6 +37,9 @@ make_lease_case() {
   fm_test_spawn_home "$home" "$harness"
   fm_git_init_commit "$proj"
   git clone -q "$proj" "$wt"
+  if [ "$proj" != "$dir/project" ]; then
+    ln -s "$proj" "$dir/project"
+  fi
   fm_test_spawn_brief "$home" "$name" "Exercise the Herdr task-copy lease for $name."
   printf '%s' "$proj" > "$d/cwd"
   printf '%s' "$proj" > "$d/fg"
@@ -289,6 +292,61 @@ test_never_moving_worktree_entry() {
   pass "Herdr refuses a never-moving pane with diagnostic context and no launch"
 }
 
+test_treehouse_root_refuses_before_lease() {
+  local id=lease-mnt-root dir config line out status
+  dir=$(make_lease_case "$id")
+  config="$dir/project/treehouse.toml"
+  line='root = "/mnt/c/Treehouse"'
+  printf '%s\n' "$line" > "$config"
+
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  expect_code 1 "$status" "spawn accepted a Windows pool for a project outside /mnt"$'\n'"$out"
+  assert_contains "$out" "$config" "refusal did not name the config file"
+  assert_contains "$out" "$line" "refusal did not name the offending root line"
+  assert_contains "$out" 'Windows disk' "refusal did not explain the mount mismatch"
+  assert_contains "$out" 'slow' "refusal did not explain the performance cost"
+  assert_contains "$out" 'mode-changed' "refusal did not explain the Git symptom"
+  assert_contains "$out" 'remove the root line' "refusal did not give the remedy"
+  [ ! -s "$dir/fake/treehouse-log" ] || fail "refusal called Treehouse"
+  [ ! -s "$dir/fake/herdr-log" ] || fail "refusal called Herdr"
+  assert_equals '.last-watcher-beat' "$(ls -A "$dir/home/state")" "refusal left task state"
+  assert_absent "$dir/home/data/$id/launch-brief.md" "refusal rendered a launch brief"
+  assert_equals "$line" "$(cat "$config")" "spawn changed the project config"
+  pass "a project outside /mnt refuses a Windows pool before any lease or task state"
+
+  printf '# %s\n[example]\n%s\n' "$line" "$line" > "$config"
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  expect_code 0 "$status" "spawn should proceed with no top-level root"$'\n'"$out"
+  assert_grep "get --lease --lease-holder $id" "$dir/fake/treehouse-log" \
+    "spawn without a top-level root did not reach the lease"
+  pass "removing the top-level root lets the same project reach the lease"
+}
+
+test_treehouse_root_allows_project_on_mount() {
+  local id=lease-mnt-project mount_dir mount_root='' dir out status
+  # /mnt is usually not writable on CI or macOS. WSL has a writable /mnt/wsl
+  # tmpfs, so the real-path exemption can be tested without writing to /mnt/c.
+  for mount_dir in /mnt/wsl /mnt; do
+    [ -d "$mount_dir" ] && [ -w "$mount_dir" ] || continue
+    mount_root=$(TMPDIR="$mount_dir" fm_test_tmproot fm-spawn-mnt-project) || continue
+    case "$mount_root" in /mnt/*) break ;; esac
+    mount_root=
+  done
+  if [ -z "$mount_root" ]; then
+    printf 'skip: project under /mnt needs a writable /mnt/wsl or /mnt\n'
+    return 0
+  fi
+  dir=$(make_lease_case "$id" codex "$mount_root/project")
+  printf 'root = "/mnt/c/Treehouse"\n' > "$mount_root/project/treehouse.toml"
+  out=$(run_lease_spawn "$dir" "$id"); status=$?
+  expect_code 0 "$status" "spawn through a symlink to a project under /mnt should proceed"$'\n'"$out"
+  assert_grep "get --lease --lease-holder $id" "$dir/fake/treehouse-log" \
+    "spawn for a project under /mnt did not reach the lease"
+  pass "a project physically under /mnt may use a pool under /mnt"
+}
+
+test_treehouse_root_refuses_before_lease
+test_treehouse_root_allows_project_on_mount
 test_delayed_worktree_entry
 test_dropped_worktree_entry
 test_never_moving_worktree_entry
