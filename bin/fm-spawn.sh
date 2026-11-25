@@ -368,6 +368,9 @@
 #   Before a secondmate launch, the home is fast-forwarded to the primary's
 #   default-branch commit when safe: directly for a local home, or through the
 #   configured host for a remote home. Skipped syncs warn and launch unchanged.
+#   Before leasing a Treehouse slot for a ship or scout, refuse a project
+#   outside /mnt whose treehouse.toml sets a top-level root under /mnt/;
+#   remove the root line to use Treehouse's default.
 #   Ship/scout spawns refuse to launch unless the resolved task path is a real
 #   git worktree root distinct from both the spawning project and its repository's
 #   primary checkout, including when the spawning project is a linked worktree.
@@ -2386,6 +2389,51 @@ if [ "$RELAUNCH" -eq 1 ]; then
     exit 1
   fi
 fi
+resolve_project_dir_arg() {
+  local path=$1
+  case "$path" in
+  projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
+  *) printf '%s\n' "$path" ;;
+  esac
+}
+
+spawn_resolve_backend() {
+  if [ "$BACKEND_SET" -eq 1 ]; then
+    BACKEND=$BACKEND_ARG
+    FM_BACKEND_DETECT_SIGNAL=""
+  else
+    # Call directly so detection leaves its signal for the meta record.
+    fm_backend_resolve
+    BACKEND=$FM_BACKEND_RESOLVED
+  fi
+  fm_backend_validate_spawn "$BACKEND"
+}
+
+spawn_guard_treehouse_root() {
+  local project config root_line
+  # Missing project paths are reported by the existing argument validation.
+  project=$(CDPATH='' cd -- "$1" 2>/dev/null && pwd -P) || return 0
+  case "$project" in /mnt | /mnt/*) return 0 ;; esac
+  config="$project/treehouse.toml"
+  [ -f "$config" ] && [ -r "$config" ] || return 0
+  root_line=$(awk '
+    /^[[:blank:]]*\[/ { exit }
+    /^[[:blank:]]*root[[:blank:]]*=[[:blank:]]*("\/mnt\/[^"]*"|\047\/mnt\/[^\047]*\047)[[:space:]]*(#.*)?$/ { print; exit }
+  ' "$config") || return 1
+  [ -n "$root_line" ] || return 0
+  printf 'error: spawn refused: %s sets %s. The project is outside /mnt, but this pool is on a Windows disk, which is slow and makes Git report every file as mode-changed; remove the root line and spawn again.\n' \
+    "$config" "$root_line" >&2
+  return 1
+}
+
+# Every fresh ordinary spawn except Orca uses Treehouse. Refuse a mismatched
+# pool before even creating the state directory or preparing a backend.
+if [ "$RELAUNCH" -eq 0 ] && [ "$KIND" != secondmate ]; then
+  spawn_resolve_backend || exit 1
+  if [ "$BACKEND" != orca ] && [ -n "${POS[1]:-}" ]; then
+    spawn_guard_treehouse_root "$(resolve_project_dir_arg "${POS[1]}")" || exit 1
+  fi
+fi
 ORCA_LAUNCH_ENV_ENABLED=0
 ORCA_LAUNCH_ENV_ARGS=
 if [ "$RELAUNCH" -eq 0 ]; then
@@ -2455,16 +2503,8 @@ fi
 # window_backend/fm_backend_of_meta already treat an absent backend= as tmux),
 # so the default path's meta stays byte-identical.
 if [ "$RELAUNCH" -eq 0 ]; then
-  if [ "$BACKEND_SET" -eq 1 ]; then
-    BACKEND=$BACKEND_ARG
-    FM_BACKEND_DETECT_SIGNAL=""
-  else
-    # Called directly so the one detection that chose BACKEND also leaves
-    # FM_BACKEND_DETECT_SIGNAL for the meta's backend_detect= line below.
-    fm_backend_resolve
-    BACKEND=$FM_BACKEND_RESOLVED
-  fi
-  fm_backend_validate_spawn "$BACKEND" || exit 1
+  # A local secondmate resolves its backend only after remote delegation.
+  [ "$KIND" != secondmate ] || spawn_resolve_backend || exit 1
   fm_backend_source "$BACKEND" || exit 1
   if [ "$BACKEND" = orca ] && [ "$KIND" = secondmate ]; then
     echo "error: backend=orca does not support --secondmate spawns yet" >&2
@@ -4154,14 +4194,6 @@ resolved_existing_dir() {
     return 1
   }
   cd "$path" && pwd -P
-}
-
-resolve_project_dir_arg() {
-  local path=$1
-  case "$path" in
-  projects/*) printf '%s/%s\n' "$PROJECTS" "${path#projects/}" ;;
-  *) printf '%s\n' "$path" ;;
-  esac
 }
 
 path_is_ancestor_of() {
