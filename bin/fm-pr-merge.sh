@@ -830,7 +830,7 @@ forgejo_base_contained() {
   json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
     "/repos/{owner}/{repo}/compare/$2...$tip" 2>/dev/null) || return 2
   count=$(printf '%s' "$json" | jq -r '
-    if type == "object" and (.total_commits | type) == "number" and (.commits | type) == "array"
+    if type == "object" and (.total_commits | type) == "number"
     then .total_commits else error("not a comparison") end' 2>/dev/null) || return 2
   FM_PR_BASE_TIP=$tip
   [ "$count" = 0 ] || return 1

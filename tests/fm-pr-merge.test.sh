@@ -3738,12 +3738,32 @@ test_forgejo_error_body_base_comparison_refuses() {
   pass "fm-pr-merge refuses a Forgejo merge whose base comparison returns an error body"
 }
 
+# A real instance can report an empty list as null, as its status endpoint
+# does, so a zero count with null commits is the up-to-date case and merges.
+test_forgejo_null_commits_base_comparison_merges() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-base-null-commits)
+  printf '{"total_commits":0,"commits":null}\n' > "$case_dir/tea-compare.json"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "forgejo-base-null-commits: a zero count with null commits should merge"
+  [ -n "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-base-null-commits: a current head never reached the merge call"
+  pass "fm-pr-merge merges a Forgejo head whose comparison reports zero commits as a null list"
+}
+
 test_github_refuses_head_missing_base_tip
 test_github_merges_head_containing_base_tip
 test_github_unreadable_base_comparison_refuses
 test_gitlab_refuses_head_missing_base_tip
 test_forgejo_refuses_head_missing_base_tip
 test_forgejo_error_body_base_comparison_refuses
+test_forgejo_null_commits_base_comparison_merges
 test_github_updated_head_other_refusals_stop_waiting
 test_github_behind_update_refuses_concurrent_head_change
 test_github_zero_exit_queue_required_refuses_with_exact_retry
