@@ -204,7 +204,11 @@ case " $* " in
     printf '%s\n' '[]'
     ;;
   *" api repos/"*"/branches/"*)
-    printf '%s\n' '{"name":"main","protected":false}'
+    printf '%s\n' '{"name":"main","commit":{"sha":"ba5e0000000000000000000000000000000000ba"},"protected":false}'
+    ;;
+  *" api repos/"*"/compare/"*)
+    # The head contains the base tip read above.
+    printf '%s\n' '{"merge_base_commit":{"sha":"ba5e0000000000000000000000000000000000ba"}}'
     ;;
   *" api repos/"*"/pulls/"*)
     printf '%s\n' "{\"state\":\"open\",\"user\":{\"login\":\"author\"},\"head\":{\"sha\":\"${FM_TEST_GH_HEAD:-0123456789abcdef0123456789abcdef01234567}\"},\"draft\":false,\"mergeable\":true,\"merged_at\":null}"

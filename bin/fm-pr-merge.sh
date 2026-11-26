@@ -32,7 +32,8 @@
 # is green at the exact current head commit, where github_checks_not_green below
 # owns what makes a check green and judges each one by its current run, and
 # every unwaived check the forge requires for the base branch has reported at
-# that head. When mergeable is the only failing condition and reads UNKNOWN,
+# that head, and the head contains the base branch's current tip (see the
+# stale-base paragraph below). When mergeable is the only failing condition and reads UNKNOWN,
 # meaning GitHub has not finished recomputing it, the caller re-reads and
 # re-checks every condition after a short bounded wait instead of refusing;
 # once that bound is spent it reports mergeability still pending rather than
@@ -139,9 +140,10 @@
 # A GitLab merge is refused unless every pre-merge condition holds, each read
 # live at merge time rather than taken from recorded metadata: the merge request
 # is open, detailed_merge_status is mergeable, has_conflicts is false,
-# blocking_discussions_resolved is true, and the head pipeline succeeded at the
-# exact current head commit. Every failing condition is reported, not just the
-# first. An attended --allow-no-pipeline, for a repository that deliberately
+# blocking_discussions_resolved is true, the head pipeline succeeded at the
+# exact current head commit, and the head contains the target branch's current
+# tip (see the stale-base paragraph below). Every failing condition is
+# reported, not just the first. An attended --allow-no-pipeline, for a repository that deliberately
 # runs no merge request pipeline, waives only the pipeline condition and only
 # when GitLab reports head_pipeline as present and null: a failed, running,
 # canceled, or stale pipeline still refuses, every other condition still
@@ -159,7 +161,8 @@
 # true, and the combined commit status at the exact current head, read across
 # every status page, is success (an unconfigured status, reported as "none",
 # refuses rather than being treated as nothing to check, the same reading
-# GitLab's null head_pipeline gets above). Every
+# GitLab's null head_pipeline gets above), and the head contains the base
+# branch's current tip (see the stale-base paragraph below). Every
 # failing condition is reported, not just the first. tea exposes no head-
 # binding flag on its own merge subcommand, so the verified head is instead
 # passed as head_commit_id to a direct call against Forgejo/Gitea's REST API
@@ -180,6 +183,22 @@
 # argument beyond a merge method is refused rather than silently dropped,
 # because there is no established translation from a gh/glab-style flag into
 # a Forgejo API field yet.
+#
+# Stale base: on every forge the head must contain the base branch's current
+# tip. The tip is read live from the forge's branch endpoint and containment is
+# computed by the forge - GitHub's compare merge base, GitLab's merge_base
+# endpoint, Forgejo's compare commit count - never from a local clone. A base
+# that moved past the head without a textual conflict leaves every other
+# condition green while the checks ran on an older base, so the refusal names
+# the fix: merge the base into the branch and re-run its delivery path
+# (no-mistakes or CI) so the checks run on the current base. An unreadable
+# branch or comparison refuses too, and no flag waives either. On GitHub only
+# a BEHIND mergeStateStatus, which GitHub reports when the base requires
+# up-to-date branches, reaches the consented --update-branch path above; any
+# other stale base refuses even with --update-branch, because without that
+# requirement nothing makes the update wait for checks on the updated head.
+# No forge merge call binds the base the way it binds the head, so a base that
+# moves between this read and the merge call is an accepted window.
 #
 # Before either forge merge, the task's existing per-task control lock
 # serializes the captain-hold check through the forge command. A still-held or
@@ -750,10 +769,104 @@ note_expected_head() {
   fi
 }
 
+# One full commit SHA at a jq path of a forge JSON payload, or failure when the
+# payload is not JSON, the field is absent or not a string, or it is not a full
+# SHA. Args: json jq-path
+forge_json_sha() {
+  local sha
+  sha=$(printf '%s' "$1" | jq -r "$2"' | if type == "string" then . else error("no sha") end' 2>/dev/null) \
+    || return 1
+  fm_pr_head_valid "$sha" || return 1
+  printf '%s' "$sha"
+}
+
+# Each forge's live base read: the base branch's current tip from the forge's
+# branch endpoint, and whether the head contains it, computed by the forge.
+# Each sets FM_PR_BASE_TIP and returns 0 when the head contains the tip, 1 when
+# it does not, and 2 when any read fails, which refuses like a stale base.
+# Args: base-branch head
+FM_PR_BASE_TIP=
+
+# GitHub's compare of tip...head reports their merge base, which is the tip
+# exactly when the head contains it.
+github_base_contained() {
+  local json tip merge_base
+  FM_PR_BASE_TIP=
+  json=$(gh api "repos/$PR_OWNER/$PR_REPO/branches/$(github_urlencode_path_segment "$1")" 2>/dev/null) \
+    || return 2
+  tip=$(forge_json_sha "$json" '.commit.sha') || return 2
+  json=$(gh api "repos/$PR_OWNER/$PR_REPO/compare/$tip...$2" 2>/dev/null) || return 2
+  merge_base=$(forge_json_sha "$json" '.merge_base_commit.sha') || return 2
+  FM_PR_BASE_TIP=$tip
+  [ "$merge_base" = "$tip" ] || return 1
+}
+
+# GitLab's merge_base endpoint answers the same question directly.
+gitlab_base_contained() {
+  local json tip merge_base project=${PR_PATH//\//%2F}
+  FM_PR_BASE_TIP=
+  json=$(GITLAB_HOST="$FM_PR_HOST" glab api --hostname "$FM_PR_HOST" \
+    "projects/$project/repository/branches/$(github_urlencode_path_segment "$1")" 2>/dev/null) \
+    || return 2
+  tip=$(forge_json_sha "$json" '.commit.id') || return 2
+  json=$(GITLAB_HOST="$FM_PR_HOST" glab api --hostname "$FM_PR_HOST" \
+    "projects/$project/repository/merge_base?refs%5B%5D=$tip&refs%5B%5D=$2" 2>/dev/null) \
+    || return 2
+  merge_base=$(forge_json_sha "$json" '.id') || return 2
+  FM_PR_BASE_TIP=$tip
+  [ "$merge_base" = "$tip" ] || return 1
+}
+
+# Forgejo has no merge-base endpoint, so its compare of head...tip counts the
+# tip's commits the head lacks; zero means the head contains the tip. "tea api"
+# exits 0 on an HTTP error with only an error body, which has no numeric
+# total_commits and so reads as a failure, never as zero.
+forgejo_base_contained() {
+  local json tip count
+  FM_PR_BASE_TIP=
+  json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+    "/repos/{owner}/{repo}/branches/$(github_urlencode_path_segment "$1")" 2>/dev/null) || return 2
+  tip=$(forge_json_sha "$json" '.commit.id') || return 2
+  json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
+    "/repos/{owner}/{repo}/compare/$2...$tip" 2>/dev/null) || return 2
+  count=$(printf '%s' "$json" | jq -r '
+    if type == "object" and (.total_commits | type) == "number"
+    then .total_commits else error("not a comparison") end' 2>/dev/null) || return 2
+  FM_PR_BASE_TIP=$tip
+  [ "$count" = 0 ] || return 1
+}
+
+# The stale-base condition shared by every forge. A head that does not contain
+# its base branch's current tip had its checks run on an older base, so they
+# say nothing about the code the merge would produce; a base that moved without
+# a textual conflict leaves every other condition green, so only this sees it.
+# Turns one forge's base read into refusal text: a stale base sets
+# FM_PR_BASE_STALE_REFUSAL, naming the fix, an unreadable one sets
+# FM_PR_BASE_UNREADABLE_REFUSAL, and a contained one clears both.
+# Args: read-status base head
+FM_PR_BASE_STALE_REFUSAL=
+FM_PR_BASE_UNREADABLE_REFUSAL=
+
+note_base_read() {
+  FM_PR_BASE_STALE_REFUSAL=
+  FM_PR_BASE_UNREADABLE_REFUSAL=
+  case "$1" in
+    0) ;;
+    1)
+      FM_PR_BASE_STALE_REFUSAL="  - head $3 does not contain $FM_PR_BASE_TIP, the current tip of base branch $2, so its checks ran on an older base; merge $2 into the branch and re-run its delivery path (no-mistakes or CI) so the checks run on the current base
+"
+      ;;
+    *)
+      FM_PR_BASE_UNREADABLE_REFUSAL="  - the current tip of base branch $2 could not be read or compared with head $3, so a base that moved past it cannot be ruled out
+"
+      ;;
+  esac
+}
+
 gitlab_verify_mergeable() {
-  local json fields line pipeline_waived
+  local json fields line pipeline_waived base_status
   local total=0 named=0 refusals=''
-  local state='' detail='' conflicts='' discussions=''
+  local state='' detail='' conflicts='' discussions='' target=''
   local live_head='' pipeline_sha='' pipeline_status='' pipeline_absent='' async_configured=''
 
   # GITLAB_HOST is set to the same host the project URL already carries, so the
@@ -778,7 +891,8 @@ gitlab_verify_mergeable() {
         "pipeline_sha=" + ((.head_pipeline.sha // "") | tostring),
         "pipeline_status=" + ((.head_pipeline.status // "") | tostring),
         "pipeline_absent=" + (if has("head_pipeline") and .head_pipeline == null then "true" else "false" end),
-        "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end)
+        "async_configured=" + (if .merge_when_pipeline_succeeds == true or (.merge_after != null) then "true" else "false" end),
+        "target=" + ((.target_branch // "") | tostring)
       else
         error("merge request payload is not an object")
       end' 2>/dev/null); then
@@ -797,6 +911,7 @@ gitlab_verify_mergeable() {
       pipeline_status=*) pipeline_status=${line#pipeline_status=} ;;
       pipeline_absent=*) pipeline_absent=${line#pipeline_absent=} ;;
       async_configured=*) async_configured=${line#async_configured=} ;;
+      target=*) target=${line#target=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
@@ -806,7 +921,7 @@ FIELDS
   # Every field named exactly once and no unnamed line: a value carrying a
   # newline would split into a line no name matches, so it is refused here
   # rather than silently truncated into a value a check could accept.
-  if [ "$named" -ne 9 ] || [ "$total" -ne 9 ]; then
+  if [ "$named" -ne 10 ] || [ "$total" -ne 10 ] || [ -z "$target" ]; then
     echo "error: could not read the GitLab merge request state before merging" >&2
     return 1
   fi
@@ -848,6 +963,11 @@ FIELDS
 "
   fi
 
+  base_status=0
+  gitlab_base_contained "$target" "$live_head" || base_status=$?
+  note_base_read "$base_status" "$target" "$live_head"
+  refusals="$refusals$FM_PR_BASE_STALE_REFUSAL$FM_PR_BASE_UNREADABLE_REFUSAL"
+
   note_expected_head "$live_head"
   if [ -n "$FM_PR_EXPECTED_HEAD_REFUSAL" ]; then
     refusals="$refusals$FM_PR_EXPECTED_HEAD_REFUSAL
@@ -882,9 +1002,9 @@ FIELDS
 # GitHub and GitLab this never sets an async/queued signal: every accepted
 # Forgejo merge here is immediate. Shares FM_PR_MERGE_HEAD, declared above.
 forgejo_verify_mergeable() {
-  local pr_json status_json fields line
+  local pr_json status_json fields line base_status
   local total=0 named=0 refusals=''
-  local state='' mergeable='' draft='' live_head='' ci_state='' page_state='' page_count='' page=1
+  local state='' mergeable='' draft='' live_head='' base='' ci_state='' page_state='' page_count='' page=1
 
   if ! pr_json=$(tea api --login "$FORGEJO_LOGIN" --repo "$PR_OWNER/$PR_REPO" \
       "/repos/{owner}/{repo}/pulls/$PR_NUMBER" 2>/dev/null) || [ -z "$pr_json" ]; then
@@ -896,7 +1016,8 @@ forgejo_verify_mergeable() {
         "state=" + ((.state // "") | tostring),
         "mergeable=" + (.mergeable | tostring),
         "draft=" + (.draft | tostring),
-        "head=" + ((.head.sha // "") | tostring)
+        "head=" + ((.head.sha // "") | tostring),
+        "base=" + ((.base.ref // "") | tostring)
       else
         error("pull request payload is not an object")
       end' 2>/dev/null); then
@@ -910,13 +1031,14 @@ forgejo_verify_mergeable() {
       mergeable=*) mergeable=${line#mergeable=} ;;
       draft=*) draft=${line#draft=} ;;
       head=*) live_head=${line#head=} ;;
+      base=*) base=${line#base=} ;;
       *) continue ;;
     esac
     named=$((named + 1))
   done <<FIELDS
 $fields
 FIELDS
-  if [ "$named" -ne 4 ] || [ "$total" -ne 4 ]; then
+  if [ "$named" -ne 5 ] || [ "$total" -ne 5 ] || [ -z "$base" ]; then
     echo "error: could not read the Forgejo pull request state before merging" >&2
     return 1
   fi
@@ -989,6 +1111,10 @@ FIELDS
   [ "$ci_state" = success ] \
     || refusals="$refusals  - the combined commit status is \"$ci_state\", not success
 "
+  base_status=0
+  forgejo_base_contained "$base" "$live_head" || base_status=$?
+  note_base_read "$base_status" "$base" "$live_head"
+  refusals="$refusals$FM_PR_BASE_STALE_REFUSAL$FM_PR_BASE_UNREADABLE_REFUSAL"
 
   note_expected_head "$live_head"
   if [ -n "$FM_PR_EXPECTED_HEAD_REFUSAL" ]; then
@@ -1137,10 +1263,11 @@ github_checks_not_green() {
 # the usual 1, when mergeable=UNKNOWN is the only failing condition, so the
 # caller can retry a still-computing mergeability read instead of refusing.
 github_verify_mergeable() {
-  local json fields line red failed name covered missing unreported producers pending
+  local json fields line red failed name covered missing unreported producers pending base_status
   local total=0 named=0 refusals='' mergeable_refusal=''
   local state='' draft='' mergeable='' merge_state='' live_head='' base=''
   FM_PR_GITHUB_BEHIND=false
+  FM_PR_GITHUB_BASE_STALE=false
   FM_PR_GITHUB_CHECKS_PENDING=false
   FM_PR_GITHUB_CHECKS_FAILED=false
   FM_PR_GITHUB_OTHER_REFUSAL=false
@@ -1235,6 +1362,17 @@ EOF
     FM_PR_GITHUB_OTHER_REFUSAL=true
     refusals="$refusals  - mergeStateStatus is DIRTY (conflicts)
 "
+  fi
+  # A stale base is a flag rather than a refusal line, like BEHIND above: the
+  # caller refuses it after any consented BEHIND update, and the update's own
+  # poll awaits the new head instead of aborting on the old one.
+  base_status=0
+  github_base_contained "$base" "$live_head" || base_status=$?
+  note_base_read "$base_status" "$base" "$live_head"
+  [ "$base_status" -ne 1 ] || FM_PR_GITHUB_BASE_STALE=true
+  if [ -n "$FM_PR_BASE_UNREADABLE_REFUSAL" ]; then
+    FM_PR_GITHUB_OTHER_REFUSAL=true
+    refusals="$refusals$FM_PR_BASE_UNREADABLE_REFUSAL"
   fi
 
   uncovered=''
@@ -1355,7 +1493,7 @@ github_update_behind_branch() {
       return 1
     fi
     if [ "$status" -eq 0 ] && [ -n "$new_head" ]; then
-      if [ "$FM_PR_GITHUB_BEHIND" = false ]; then
+      if [ "$FM_PR_GITHUB_BEHIND" = false ] && [ "$FM_PR_GITHUB_BASE_STALE" = false ]; then
         cat "$attempt_error" >&2
         rm -f "$attempt_error"
         return 0
@@ -1895,10 +2033,20 @@ case "$PROVIDER" in
     refuse_github_queue_while_away || exit 2
     if [ "$FM_PR_GITHUB_BEHIND" = true ]; then
       if [ "$UPDATE_BRANCH" != true ]; then
+        if [ "$FM_PR_GITHUB_BASE_STALE" = true ]; then
+          printf 'error: refusing to merge %s\n%s' "$URL" "$FM_PR_BASE_STALE_REFUSAL" >&2
+        fi
         echo "error: $URL is behind its base; updating its source branch requires explicit --update-branch consent on this authorized merge request (the update remains if new checks prevent merging)" >&2
         exit 1
       fi
       github_update_behind_branch || exit 1
+    fi
+    # Only a BEHIND mergeStateStatus, which GitHub reports only when the base
+    # requires up-to-date branches, reaches the consented update above; every
+    # other stale base refuses here even with --update-branch.
+    if [ "$FM_PR_GITHUB_BASE_STALE" = true ]; then
+      printf 'error: refusing to merge %s\n%s' "$URL" "$FM_PR_BASE_STALE_REFUSAL" >&2
+      exit 1
     fi
     merge_status=0
     merge_output=$(gh pr merge "$PR_NUMBER" --repo "$PR_OWNER/$PR_REPO" \
