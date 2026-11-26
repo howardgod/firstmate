@@ -130,7 +130,12 @@ case "${1:-} ${2:-}" in
       *) printf '%s\n' '[]' ;;
     esac
     ;;
-  "api repos/"*) printf '%s\n' '{"name":"main","protected":false}' ;;
+  "api repos/"*)
+    case "$2" in
+      */compare/*) printf '%s\n' '{"merge_base_commit":{"sha":"ba5e0000000000000000000000000000000000ba"}}' ;;
+      *) printf '%s\n' '{"name":"main","commit":{"sha":"ba5e0000000000000000000000000000000000ba"},"protected":false}' ;;
+    esac
+    ;;
 esac
 SH
   cat > "$home/fakebin/gh-axi" <<'SH'

@@ -180,6 +180,7 @@ Read live from `tea api ... /repos/{owner}/{repo}/pulls/{n}` (`state`, `mergeabl
 The combined-status endpoint computes its `state` from one page of the latest status per context, so every page is read until an empty one and the head is green only when each non-empty page reads `success`.
 A positive `draft` reading refuses; an instance too old to report the field still refuses a work-in-progress merge server side.
 `tea api` passes a query string through unchanged, because it builds the request URL by plain concatenation onto the login's `/api/v1` base.
+**Not verified here:** the stale-base condition's reads, `tea api ... /repos/{owner}/{repo}/branches/{branch}` (`commit.id`) and `tea api ... /repos/{owner}/{repo}/compare/{head}...{tip}` (`total_commits`), postdate this pass and are covered only by `tests/fm-pr-merge.test.sh` fixtures.
 An already-merged pull request is correctly refused for a second merge attempt:
 
 ```

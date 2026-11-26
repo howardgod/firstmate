@@ -37,6 +37,11 @@ FJ_URL="https://$FJ_HOST/$FJ_OWNER/$FJ_REPO/pulls/9"
 FJ_HEAD=cccccccccccccccccccccccccccccccccccccccc
 FJ_STALE_HEAD=dddddddddddddddddddddddddddddddddddddddd
 
+# The base branch tip every forge reports by default. Each forge mock answers
+# that the head contains it unless a case writes a stale comparison.
+BASE_TIP=ba5e0000000000000000000000000000000000ba
+STALE_MERGE_BASE=5a1e000000000000000000000000000000000000
+
 JQ_BIN=$(command -v jq) || fail "these tests read glab's JSON with the real jq, which was not found"
 REAL_MV=$(command -v mv) || fail "these tests need mv to simulate a failed poll publish"
 
@@ -94,8 +99,8 @@ write_github_required() {
       *) fail "write_github_required: unknown spec '$spec'" ;;
     esac
   done
-  printf '{"name":"main","protected":%s,"protection":{"enabled":%s,"required_status_checks":{"enforcement_level":"%s","contexts":[%s],"checks":[%s]}}}\n' \
-    "$protected" "$protected" "$([ "$protected" = true ] && echo non_admins || echo off)" "$contexts" "$checks" \
+  printf '{"name":"main","commit":{"sha":"%s"},"protected":%s,"protection":{"enabled":%s,"required_status_checks":{"enforcement_level":"%s","contexts":[%s],"checks":[%s]}}}\n' \
+    "$BASE_TIP" "$protected" "$protected" "$([ "$protected" = true ] && echo non_admins || echo off)" "$contexts" "$checks" \
     > "$case_dir/github-branch.json"
   printf '[{"type":"deletion"}%s]\n' "${rules:+,$rules}" > "$case_dir/github-required-rules.json"
 }
@@ -321,6 +326,20 @@ case "${1:-} ${2:-}" in
         cat "$FM_TEST_GH_RUNS"
         exit $?
         ;;
+      *" repos/"*"/compare/"*)
+        # The head contains the base tip unless the case wrote a comparison.
+        if [ -f "${FM_TEST_GH_COMPARE:-}" ]; then
+          cat "$FM_TEST_GH_COMPARE"
+          exit 0
+        fi
+        for arg in "$@"; do
+          case "$arg" in
+            repos/*/compare/*) spec=${arg##*/compare/} ;;
+          esac
+        done
+        printf '{"merge_base_commit":{"sha":"%s"}}\n' "${spec%%...*}"
+        exit 0
+        ;;
       *" repos/"*"/rules/branches/"*merge_queue*) ;;
       *" repos/"*"/rules/branches/"*)
         if [ -f "${FM_TEST_GH_REQUIRED_RULES_FAIL:-}" ]; then
@@ -449,6 +468,26 @@ case "${1:-} ${2:-}" in
     : > "$case_dir/glab-merge-called"
     exit 0
     ;;
+  "api --hostname")
+    # The base read: the target branch tip, then its merge base with the
+    # head, which is the tip itself unless the case wrote a stale one.
+    case "${4:-}" in
+      */repository/branches/*)
+        [ ! -e "$case_dir/glab-branch-fails" ] || exit 1
+        printf '{"name":"main","commit":{"id":"%s"}}\n' ba5e0000000000000000000000000000000000ba
+        ;;
+      */repository/merge_base\?*)
+        if [ -f "$case_dir/glab-merge-base.json" ]; then
+          cat "$case_dir/glab-merge-base.json"
+        else
+          tip=${4#*refs%5B%5D=}
+          printf '{"id":"%s"}\n' "${tip%%&*}"
+        fi
+        ;;
+      *) exit 1 ;;
+    esac
+    exit 0
+    ;;
 esac
 exit 0
 SH
@@ -490,7 +529,7 @@ write_mr_json() {
     "$state" "$detail" "$conflicts" > "$file"
   printf '"blocking_discussions_resolved":%s,"sha":"%s","head_pipeline":%s,' \
     "$discussions" "$head" "$pipeline" >> "$file"
-  printf '"merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
+  printf '"target_branch":"main","merge_when_pipeline_succeeds":%s,"merge_after":%s}\n' \
     "$merge_when_pipeline_succeeds" "$merge_after" >> "$file"
 }
 
@@ -564,6 +603,18 @@ case "$endpoint" in
       printf '{"default_merge_style":"merge"}\n'
     fi
     ;;
+  */branches/*)
+    [ ! -e "$log_dir/tea-branch-fails" ] || exit 1
+    printf '{"name":"main","commit":{"id":"%s"}}\n' ba5e0000000000000000000000000000000000ba
+    ;;
+  */compare/*)
+    # The tip's commits the head lacks: none unless the case wrote some.
+    if [ -e "$log_dir/tea-compare.json" ]; then
+      cat "$log_dir/tea-compare.json"
+    else
+      printf '{"total_commits":0,"commits":[]}\n'
+    fi
+    ;;
   */merge)
     if [ -e "$log_dir/tea-merge-fails" ]; then
       printf '{"message":"merge failed"}\n'
@@ -622,7 +673,7 @@ write_forgejo_pr_json() {
       *) fail "write_forgejo_pr_json: unknown field '$key'" ;;
     esac
   done
-  printf '{"state":"%s","mergeable":%s,"merged":%s,"draft":%s,"head":{"sha":"%s"}}\n' \
+  printf '{"state":"%s","mergeable":%s,"merged":%s,"draft":%s,"head":{"sha":"%s"},"base":{"ref":"main"}}\n' \
     "$state" "$mergeable" "$merged" "$draft" "$head" > "$file"
 }
 
@@ -767,6 +818,7 @@ run_pr_merge() {
   FM_TEST_GH_RULES_FAIL="$case_dir/github-rules-fail" \
   FM_TEST_GH_RULES_FAIL_BODY="$case_dir/github-rules-fail-body" \
   FM_TEST_GH_BRANCH="$case_dir/github-branch.json" \
+  FM_TEST_GH_COMPARE="$case_dir/github-compare.json" \
   FM_TEST_GH_BRANCH_FAIL="$case_dir/github-branch-fail" \
   FM_TEST_GH_REQUIRED_RULES="$case_dir/github-required-rules.json" \
   FM_TEST_GH_REQUIRED_RULES_FAIL="$case_dir/github-required-rules-fail" \
@@ -3550,6 +3602,148 @@ test_github_updated_head_other_refusals_stop_waiting() {
   pass "fm-pr-merge immediately refuses draft, closed, conflicting, or unreadable updated heads despite pending or missing checks"
 }
 
+# A base that moved past the head without a textual conflict leaves the pull
+# request mergeable and every check green, so only the live base read sees that
+# those checks ran on an older base. The refusal names the worker's fix, and a
+# base that GitHub does not report as BEHIND never reaches --update-branch.
+test_github_refuses_head_missing_base_tip() {
+  local case_dir rc head=1234567890abcdef1234567890abcdef12345678
+  case_dir=$(make_case base-moved)
+  add_gh_mocks "$case_dir" "$head"
+  printf '{"status":"diverged","behind_by":3,"merge_base_commit":{"sha":"%s"}}\n' \
+    "$STALE_MERGE_BASE" > "$case_dir/github-compare.json"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6201 --update-branch \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-moved: a head missing the base tip should refuse"
+  assert_grep "api repos/example/repo/compare/$BASE_TIP...$head" "$case_dir/gh.log" \
+    "base-moved: the forge was not asked to compare the live base tip with the head"
+  assert_grep "error: refusing to merge https://github.com/example/repo/pull/6201" "$case_dir/stderr" \
+    "base-moved: the refusal did not name the pull request"
+  assert_grep "head $head does not contain $BASE_TIP, the current tip of base branch main, so its checks ran on an older base; merge main into the branch and re-run its delivery path (no-mistakes or CI) so the checks run on the current base" \
+    "$case_dir/stderr" "base-moved: the refusal did not name the stale base and its fix"
+  assert_no_grep 'pr merge ' "$case_dir/gh.log" \
+    "base-moved: a head missing the base tip still reached the merge command"
+  assert_no_grep '/update-branch' "$case_dir/gh.log" \
+    "base-moved: a base GitHub did not report as BEHIND was updated"
+  pass "fm-pr-merge refuses a GitHub head that does not contain its base branch's current tip"
+}
+
+test_github_merges_head_containing_base_tip() {
+  local case_dir rc head=1234567890abcdef1234567890abcdef12345679
+  case_dir=$(make_case base-current)
+  add_gh_mocks "$case_dir" "$head"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6202 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "base-current: a head containing the base tip should merge"
+  assert_grep "api repos/example/repo/branches/main" "$case_dir/gh.log" \
+    "base-current: the base tip was not read from the forge"
+  assert_grep "api repos/example/repo/compare/$BASE_TIP...$head" "$case_dir/gh.log" \
+    "base-current: the forge was not asked to compare the live base tip with the head"
+  assert_logged_gh_merge "$case_dir" 6202 example/repo --squash
+  pass "fm-pr-merge merges a GitHub head that contains its base branch's current tip"
+}
+
+# An answer that is not a comparison, such as an error body, cannot rule out a
+# moved base, so it refuses rather than reading as current.
+test_github_unreadable_base_comparison_refuses() {
+  local case_dir rc head=1234567890abcdef1234567890abcdef1234567a
+  case_dir=$(make_case base-unreadable)
+  add_gh_mocks "$case_dir" "$head"
+  printf '{"message":"Not Found","status":"404"}\n' > "$case_dir/github-compare.json"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 https://github.com/example/repo/pull/6203 \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "base-unreadable: an unreadable base comparison should refuse"
+  assert_grep "the current tip of base branch main could not be read or compared with head $head" \
+    "$case_dir/stderr" "base-unreadable: the refusal did not name the unreadable base"
+  assert_no_grep 'pr merge ' "$case_dir/gh.log" \
+    "base-unreadable: an unreadable base comparison still reached the merge command"
+  pass "fm-pr-merge refuses a GitHub merge whose base comparison cannot be read"
+}
+
+test_gitlab_refuses_head_missing_base_tip() {
+  local case_dir rc
+  case_dir=$(make_gitlab_case gitlab-base-moved)
+  printf '{"id":"%s"}\n' "$STALE_MERGE_BASE" > "$case_dir/glab-merge-base.json"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$MR_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "gitlab-base-moved: a head missing the base tip should refuse"
+  assert_grep "GITLAB_HOST=$MR_HOST api --hostname $MR_HOST projects/group%2Fsubgroup%2Fproject/repository/merge_base?refs%5B%5D=$BASE_TIP&refs%5B%5D=$MR_HEAD" \
+    "$case_dir/glab.log" "gitlab-base-moved: the merge base of the live tip and head was not read"
+  assert_grep "head $MR_HEAD does not contain $BASE_TIP, the current tip of base branch main, so its checks ran on an older base; merge main into the branch and re-run its delivery path (no-mistakes or CI)" \
+    "$case_dir/stderr" "gitlab-base-moved: the refusal did not name the stale base and its fix"
+  [ -z "$(glab_merge_line "$case_dir/glab.log")" ] \
+    || fail "gitlab-base-moved: a head missing the base tip still reached the merge command"
+  pass "fm-pr-merge refuses a GitLab head that does not contain its target branch's current tip"
+}
+
+test_forgejo_refuses_head_missing_base_tip() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-base-moved)
+  printf '{"total_commits":2,"commits":[{},{}]}\n' > "$case_dir/tea-compare.json"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-base-moved: a head missing the base tip should refuse"
+  assert_grep "/repos/{owner}/{repo}/compare/$FJ_HEAD...$BASE_TIP" "$case_dir/tea.log" \
+    "forgejo-base-moved: the head was not compared with the live base tip"
+  assert_grep "head $FJ_HEAD does not contain $BASE_TIP, the current tip of base branch main, so its checks ran on an older base; merge main into the branch and re-run its delivery path (no-mistakes or CI)" \
+    "$case_dir/stderr" "forgejo-base-moved: the refusal did not name the stale base and its fix"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-base-moved: a head missing the base tip still reached the merge call"
+  pass "fm-pr-merge refuses a Forgejo head that does not contain its base branch's current tip"
+}
+
+# tea api exits 0 on an HTTP error, so an error body must refuse as unreadable
+# rather than count as zero missing commits.
+test_forgejo_error_body_base_comparison_refuses() {
+  local case_dir rc
+  case_dir=$(make_forgejo_case forgejo-base-error-body)
+  printf '{"message":"The target couldn'"'"'t be found."}\n' > "$case_dir/tea-compare.json"
+
+  set +e
+  run_pr_merge "$case_dir" task-x1 "$FJ_URL" \
+    > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "forgejo-base-error-body: an error body should refuse"
+  assert_grep "the current tip of base branch main could not be read or compared with head $FJ_HEAD" \
+    "$case_dir/stderr" "forgejo-base-error-body: the refusal did not name the unreadable base"
+  [ -z "$(tea_merge_line "$case_dir/tea.log")" ] \
+    || fail "forgejo-base-error-body: an unreadable comparison still reached the merge call"
+  pass "fm-pr-merge refuses a Forgejo merge whose base comparison returns an error body"
+}
+
+test_github_refuses_head_missing_base_tip
+test_github_merges_head_containing_base_tip
+test_github_unreadable_base_comparison_refuses
+test_gitlab_refuses_head_missing_base_tip
+test_forgejo_refuses_head_missing_base_tip
+test_forgejo_error_body_base_comparison_refuses
 test_github_updated_head_other_refusals_stop_waiting
 test_github_behind_update_refuses_concurrent_head_change
 test_github_zero_exit_queue_required_refuses_with_exact_retry
